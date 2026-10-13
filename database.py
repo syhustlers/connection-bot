@@ -3,7 +3,6 @@ import sqlite3
 def init_db():
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    # Users table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id TEXT PRIMARY KEY,
@@ -12,7 +11,6 @@ def init_db():
             joined_date TEXT
         )
     """)
-    # Referrals table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS referrals (
             referrer_id TEXT,
@@ -20,7 +18,6 @@ def init_db():
             UNIQUE(referrer_id, referred_id)
         )
     """)
-    # Seen images table to prevent repetition
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS seen_images (
             user_id TEXT,
@@ -28,7 +25,6 @@ def init_db():
             UNIQUE(user_id, image_url)
         )
     """)
-    # Payment orders table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             order_id TEXT PRIMARY KEY,
@@ -117,3 +113,4 @@ def save_order(order_id, user_id, phone, amount, status):
                    (order_id, str(user_id), phone, amount, status))
     conn.commit()
     conn.close()
+    
