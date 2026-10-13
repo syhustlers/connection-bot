@@ -44,10 +44,10 @@ NAMES = [
     "Lucy", "Rose", "Florence", "Winnie", "Veronica", "Angel", "Faith", "Hope", "Nancy",
     "Sylvia", "Belinda", "Miriam", "Dorcas", "Queen", "Precious", "Rebecca", "Deborah", "Tina", "Aida", "Flora",
     "Anita", "Rashida", "Zuleha", "Magreth", "Zaina", "Glory", "Paulina", "Emmy", "Shamsa",
-    "Ester", "Vicky", "Frida", "Brenda", "Prisca", "Frola", "Beatrice", "Diana", "Priscila"
+    "Ester", "Vicky", "Frida", "Prisca", "Frola", "Beatrice", "Priscila"
 ]
 
-# --- IMAGE POOL (You can add or update links here anytime) ---
+# --- IMAGE POOL ---
 IMAGES = [
     "https://i.postimg.cc/0j5pWDd3/FB-IMG-17498784707977300.jpg",
     "https://i.postimg.cc/Bbh2dbmv/FB-IMG-17498785863347517.jpg",
@@ -74,12 +74,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(user.id)
     add_user(user_id, user.username, user.first_name, str(datetime.utcnow()))
 
-    # Handle referral check
     if context.args:
         ref_id = context.args[0]
         add_referral(ref_id, user_id)
 
-    # Intro message & self-deleting loading animation
     intro_msg = await update.message.reply_text("🍑 Mambo! Karibu kwenye @connectiontzzbot 🔞🇹🇿\nTunatayarisha mfumo wa Mikoa...")
     await asyncio.sleep(2)
     load_msg = await intro_msg.edit_text("Inatayarisha...... ⏳")
@@ -201,7 +199,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "back":
         await query.message.reply_text("⬅️ Chagua mkoa mwingine hapa chini:", reply_markup=get_region_keyboard())
 
-# --- ADMIN BOT HANDLERS (@connectiontzzadminbot) ---
+# --- ADMIN BOT HANDLERS ---
 async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         return
@@ -219,7 +217,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = get_total_users_count()
     await update.message.reply_text(f"📊 *Total Registered Users:* `{total}`", parse_mode="Markdown")
 
-async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, main_app):
     if str(update.effective_user.id) != ADMIN_ID:
         return
     
@@ -234,24 +232,20 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_msg = await update.message.reply_text(f"🚀 Inaanza kutuma kwa watumiaji {len(users)}...")
 
-    # We will use the main bot token application to broadcast to users
-    main_app = ApplicationBuilder().token(MAIN_BOT_TOKEN).build()
-    async with main_app.bot:
-        for uid in users:
-            try:
-                if update.message.reply_to_message:
-                    await main_app.bot.copy_message(chat_id=uid, from_chat_id=update.effective_chat.id, message_id=update.message.reply_to_message.message_id)
-                else:
-                    await main_app.bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
-                success += 1
-                await asyncio.sleep(0.05) # Prevent flood limits
-            except Exception:
-                failed += 1
+    for uid in users:
+        try:
+            if update.message.reply_to_message:
+                await main_app.bot.copy_message(chat_id=uid, from_chat_id=update.effective_chat.id, message_id=update.message.reply_to_message.message_id)
+            else:
+                await main_app.bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
+            success += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
 
     await status_msg.edit_text(f"✅ Broadcast Imekamilika!\n\nImetumika: {success}\nImeshindikana: {failed}")
 
-
-# --- FLASK WEB SERVER FOR RENDER 24/7 ---
+# --- FLASK WEB SERVER ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -262,31 +256,43 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-def start_web():
-    t = Thread(target=run_flask)
-    t.start()
-
-
-# --- BOT RUNNERS ---
-def run_admin_bot():
-    admin_app = ApplicationBuilder().token(ADMIN_BOT_TOKEN).build()
-    admin_app.add_handler(CommandHandler("start", admin_start))
-    admin_app.add_handler(CommandHandler("stats", admin_stats))
-    admin_app.add_handler(CommandHandler("broadcast", admin_broadcast))
-    admin_app.run_polling()
-
-if __name__ == "__main__":
+# --- UNIFIED ASYNC MAIN RUNNER ---
+async def main():
     init_db()
-    start_web()
 
-    # Run Admin bot in background thread, Main bot on main thread
-    from threading import Thread
-    admin_thread = Thread(target=run_admin_bot)
-    admin_thread.start()
+    # Start Flask server in background thread (safe for web health checks)
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
 
-    print("🤖 Main Bot & Admin Bot are starting...")
+    # Build Applications
     main_app = ApplicationBuilder().token(MAIN_BOT_TOKEN).build()
+    admin_app = ApplicationBuilder().token(ADMIN_BOT_TOKEN).build()
+
+    # Main Bot Handlers
     main_app.add_handler(CommandHandler("start", start))
     main_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, region_click))
     main_app.add_handler(CallbackQueryHandler(handle_callback))
-    main_app.run_polling()
+
+    # Admin Bot Handlers
+    admin_app.add_handler(CommandHandler("start", admin_start))
+    admin_app.add_handler(CommandHandler("stats", admin_stats))
+    admin_app.add_handler(CommandHandler("broadcast", lambda u, c: admin_broadcast(u, c, main_app)))
+
+    # Initialize both
+    await main_app.initialize()
+    await admin_app.initialize()
+    await main_app.start()
+    await admin_app.start()
+
+    # Start polling on both apps simultaneously in the main loop
+    await main_app.updater.start_polling()
+    await admin_app.updater.start_polling()
+
+    print("🤖 Main Bot & Admin Bot are running successfully!")
+
+    # Keep alive forever
+    stop_event = asyncio.Event()
+    await stop_event.wait()
+
+if __name__ == "__main__":
+    asyncio.run(main())
