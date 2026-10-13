@@ -20,6 +20,24 @@ def init_db():
             UNIQUE(referrer_id, referred_id)
         )
     """)
+    # Seen images table to prevent repetition
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS seen_images (
+            user_id TEXT,
+            image_url TEXT,
+            UNIQUE(user_id, image_url)
+        )
+    """)
+    # Payment orders table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id TEXT PRIMARY KEY,
+            user_id TEXT,
+            phone TEXT,
+            amount INTEGER,
+            status TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -69,3 +87,33 @@ def get_total_users_count():
     count = cursor.fetchone()[0]
     conn.close()
     return count
+
+def get_seen_images(user_id):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT image_url FROM seen_images WHERE user_id = ?", (str(user_id),))
+    images = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return images
+
+def add_seen_image(user_id, image_url):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO seen_images (user_id, image_url) VALUES (?, ?)", (str(user_id), image_url))
+    conn.commit()
+    conn.close()
+
+def reset_seen_images(user_id):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM seen_images WHERE user_id = ?", (str(user_id),))
+    conn.commit()
+    conn.close()
+
+def save_order(order_id, user_id, phone, amount, status):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO orders (order_id, user_id, phone, amount, status) VALUES (?, ?, ?, ?, ?)",
+                   (order_id, str(user_id), phone, amount, status))
+    conn.commit()
+    conn.close()
