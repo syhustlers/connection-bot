@@ -2,7 +2,6 @@ import os
 import random
 import asyncio
 import logging
-import requests
 from datetime import datetime
 from flask import Flask
 from threading import Thread
@@ -12,12 +11,12 @@ from telegram import (
 )
 from telegram.ext import (
     ApplicationBuilder, ContextTypes, CommandHandler,
-    CallbackQueryHandler, MessageHandler, filters, ConversationHandler
+    CallbackQueryHandler, MessageHandler, filters
 )
 
 from database import (
     init_db, add_user, add_referral, get_referral_count, get_all_users, 
-    get_total_users_count, get_seen_images, add_seen_image, reset_seen_images, save_order
+    get_total_users_count, get_seen_images, add_seen_image, reset_seen_images
 )
 
 # --- TOKENS & CONFIGS ---
@@ -25,14 +24,10 @@ MAIN_BOT_TOKEN = "8050903104:AAH0KH4ah-bdLkkNBoW2pMop3FO5-H2DN-4"
 ADMIN_BOT_TOKEN = "8900606629:AAFrZXxBockQJSAJ8SqwUid98lNFt3XL4Co"
 ADMIN_ID = "8231186202"
 CPA_LINK = "https://tinyurl.com/Activebot"
-HARAKAPAY_API_KEY = "hpk_29f08857e1613f2df534581540097759168284249880fa85"
-HARAKAPAY_BASE_URL = "https://harakapay.net"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-WAITING_PHONE = 1
-
-# --- CUSTOM REGION LAYOUT (1, 2, 1, 3, 1, 2, 1, 3...) ---
+# --- CUSTOM REGION LAYOUT ---
 REGIONS = [
     "Dar es Salaam", "Arusha", "Mwanza", "Dodoma", "Geita", "Iringa", "Kagera", "Katavi", "Kigoma", 
     "Kilimanjaro", "Lindi", "Manyara", "Mara", "Mbeya", "Morogoro", "Mtwara", "Njombe", "Pwani", 
@@ -54,7 +49,7 @@ def get_region_keyboard():
         idx += 1
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# --- NAMES & IMAGE POOL FROM UPLOADED SOURCE ---
+# --- NAMES & IMAGE POOL ---
 NAMES = [
     "Asha", "Neema", "Amina", "Rehema", "Subira", "Zainabu", "Mariam", "Sophia", "Latifa", "Yasmin",
     "Tatu", "Zuhura", "Janet", "Vero", "Happy", "Joyce", "Stella", "Lilian", "Agnes", "Mwanahamis",
@@ -200,7 +195,6 @@ async def region_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = str(update.effective_user.id)
 
-    # Hide keyboard completely when showing profile
     hide_kb = await update.message.reply_text("<i>🔄 Inapakia taarifa za eneo lako...</i>", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
     await asyncio.sleep(1)
     await hide_kb.delete()
@@ -245,7 +239,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(query.from_user.id)
 
     if query.data == "get_connection":
-        # 4-step italicized cinematic loading sequence
         msg = await query.message.reply_text("<i>🔍 Kuchunguza seva za usalama...</i>", parse_mode="HTML")
         await asyncio.sleep(1)
         msg = await msg.edit_text("<i>🔄 Inatafuta data za mtumiaji...</i>", parse_mode="HTML")
@@ -258,14 +251,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.reply_text(
             "🛑 <b>SYSTEM SECURITY ERROR [ERR_AUTH_403]</b> 🛑\n\n"
-            "Uunganishwaji umesitishwa kwa muda. Ili kulinda faragha ya mhusika, unahitaji kukamilisha uthibitisho wa mfumo kupitia mojawapo ya njia hapa chini 👇",
+            "Uunganishwaji umesitishwa kwa muda. Ili kulinda faragha ya mhusika, unahitaji kukamilisha uthibitisho wa mfumo kupitia njia hapa chini 👇",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("✅ ACTIVATION 1", callback_data="activation1"),
                     InlineKeyboardButton("✅ ACTIVATION 2", callback_data="activation2")
                 ],
-                [InlineKeyboardButton("✅ ACTIVATION 3", callback_data="activation3")],
                 [InlineKeyboardButton("🔙 RUDI", callback_data="back")]
             ])
         )
@@ -304,17 +296,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🎉 <b>HONGERA!</b>\n\n✅ UMEKAMILISHA VERIFICATION YA PILI!\nTafadhali wasiliana na Admin wetu @Aishasmith0 na utume neno <b>APPROVAL</b> kupata kibali chako cha kuunganishwa.",
                 parse_mode="HTML"
             )
-    elif query.data == "activation3":
-        await query.message.edit_text(
-            "💳 <b>ACTIVATION YA HARAKA - TZS 3,000</b>\n\n"
-            "Tafadhali weka namba yako ya simu ya mtandao (M-Pesa, TigoPesa, AirtelMoney) ili mfumo ukututumie ombi la malipo moja kwa moja (USSD Push).\n\n"
-            "Andika namba yako hapa chini (mfano: 0712345678):",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 RUDI", callback_data="back_to_error")]
-            ])
-        )
-        return WAITING_PHONE
     elif query.data == "back_to_error":
         await query.message.edit_text(
             "🛑 <b>SYSTEM SECURITY ERROR [ERR_AUTH_403]</b> 🛑\n\nChagua njia ya activation hapa chini 👇",
@@ -324,7 +305,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton("✅ ACTIVATION 1", callback_data="activation1"),
                     InlineKeyboardButton("✅ ACTIVATION 2", callback_data="activation2")
                 ],
-                [InlineKeyboardButton("✅ ACTIVATION 3", callback_data="activation3")],
                 [InlineKeyboardButton("🔙 RUDI", callback_data="back")]
             ])
         )
@@ -333,61 +313,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "back_to_regions":
         await query.message.reply_text("✨ <b>Umerudi kwenye orodha kuu ya mikoa. Chagua mkoa wako:</b>", parse_mode="HTML", reply_markup=get_region_keyboard())
 
-async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text in REGIONS:
-        await update.message.reply_text("⬅️ Umerudi kwenye mkoa.", reply_markup=get_region_keyboard())
-        return ConversationHandler.END
 
-    user_id = str(update.effective_user.id)
-    phone = text
-
-    if not phone.startswith("0") or len(phone) < 10:
-        await update.message.reply_text("❌ Namba si sahihi. Weka namba sahihi ya simu (mfano: 0712345678) au tuma /cancel kusitisha:")
-        return WAITING_PHONE
-
-    status_msg = await update.message.reply_text("⏳ Inatuma ombi la USSD Push kwenye simu yako...")
-
-    try:
-        response = requests.post(
-            f"{HARAKAPAY_BASE_URL}/api/v1/collect",
-            json={
-                "phone": phone,
-                "amount": 3000,
-                "description": "Connection Activation Fee"
-            },
-            headers={
-                "Content-Type": "application/json",
-                "X-API-Key": HARAKAPAY_API_KEY
-            },
-            timeout=15
-        )
-        res_data = response.json()
-
-        if res_data.get("success"):
-            order_id = res_data.get("order_id")
-            save_order(order_id, user_id, phone, 3000, "pending")
-            await status_msg.edit_text(
-                f"📱 <b>USSD PUSH IMETUMWA!</b>\n\n"
-                f"Weka PIN kwenye simu yako kulipia TZS 3,000.\n"
-                f"Order ID: <code>{order_id}</code>\n\n"
-                f"Ukimaliza, wasiliana na Admin @Aishasmith0 na utume neno <b>APPROVAL</b> pamoja na Order ID hii.",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]])
-            )
-        else:
-            await status_msg.edit_text(f"❌ Imeshindikana: {res_data.get('error', 'Jaribu tena baadaye.')}")
-    except Exception:
-        await status_msg.edit_text("❌ Hitilafu ya kimtandao wakati wa kuunganishwa na HarakaPay.")
-
-    return ConversationHandler.END
-
-async def cancel_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Imesitishwa.", reply_markup=get_region_keyboard())
-    return ConversationHandler.END
-
-
-# --- FULLY UPGRADED INTERACTIVE ADMIN BOT (@connectiontzzadminbot) ---
+# --- ADMIN BOT HANDLERS ---
 async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         return
@@ -397,9 +324,8 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📊 Angalia Takwimu", callback_data="admin_stats"),
-             InlineKeyboardButton("💰 Salio la HarakaPay", callback_data="admin_wallet")],
-            [InlineKeyboardButton("📢 Tuma Tangazo (Broadcast)", callback_data="admin_broadcast_prompt"),
-             InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
+             InlineKeyboardButton("📢 Tuma Tangazo (Broadcast)", callback_data="admin_broadcast_prompt")],
+            [InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
         ])
     )
 
@@ -414,21 +340,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(
             f"📊 <b>SYSTEM STATISTICS</b>\n\n"
             f"👥 Total Registered Users: <code>{total_users}</code>\n\n"
-            f"Bonyeza /start kurudi kwenye menyu kuu.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
-        )
-    elif query.data == "admin_wallet":
-        wallet_bal = 0
-        try:
-            res = requests.get(f"{HARAKAPAY_BASE_URL}/api/v1/balance", headers={"X-API-Key": HARAKAPAY_API_KEY}, timeout=10).json()
-            if res.get("success"):
-                wallet_bal = res.get("wallet_balance", 0)
-        except Exception:
-            pass
-        await query.message.edit_text(
-            f"💰 <b>HARAKAPAY WALLET BALANCE</b>\n\n"
-            f"💵 Salio: <code>TZS {wallet_bal}</code>\n\n"
             f"Bonyeza /start kurudi kwenye menyu kuu.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
@@ -457,9 +368,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📊 Angalia Takwimu", callback_data="admin_stats"),
-                 InlineKeyboardButton("💰 Salio la HarakaPay", callback_data="admin_wallet")],
-                [InlineKeyboardButton("📢 Tuma Tangazo (Broadcast)", callback_data="admin_broadcast_prompt"),
-                 InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
+                 InlineKeyboardButton("📢 Tuma Tangazo (Broadcast)", callback_data="admin_broadcast_prompt")],
+                [InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
             ])
         )
 
@@ -513,18 +423,9 @@ async def main():
     main_app = ApplicationBuilder().token(MAIN_BOT_TOKEN).build()
     admin_app = ApplicationBuilder().token(ADMIN_BOT_TOKEN).build()
 
-    conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(handle_callback, pattern="^activation3$")],
-        states={
-            WAITING_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_phone)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_phone)]
-    )
-
     # Main Bot Handlers
     main_app.add_handler(CommandHandler("start", start))
     main_app.add_handler(CallbackQueryHandler(age_callback, pattern="^age_"))
-    main_app.add_handler(conv_handler)
     main_app.add_handler(CallbackQueryHandler(handle_callback))
     main_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, region_click))
 
@@ -541,7 +442,7 @@ async def main():
     await main_app.updater.start_polling()
     await admin_app.updater.start_polling()
 
-    print("🤖 Upgraded Main Bot & Master Admin Panel running successfully!")
+    print("🤖 Upgraded Main Bot & Master Admin Panel running successfully without Activation 3!")
 
     stop_event = asyncio.Event()
     await stop_event.wait()
