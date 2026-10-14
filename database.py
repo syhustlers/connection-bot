@@ -25,15 +25,6 @@ def init_db():
             UNIQUE(user_id, image_url)
         )
     """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            order_id TEXT PRIMARY KEY,
-            user_id TEXT,
-            phone TEXT,
-            amount INTEGER,
-            status TEXT
-        )
-    """)
     conn.commit()
     conn.close()
 
@@ -105,12 +96,3 @@ def reset_seen_images(user_id):
     cursor.execute("DELETE FROM seen_images WHERE user_id = ?", (str(user_id),))
     conn.commit()
     conn.close()
-
-def save_order(order_id, user_id, phone, amount, status):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO orders (order_id, user_id, phone, amount, status) VALUES (?, ?, ?, ?, ?)",
-                   (order_id, str(user_id), phone, amount, status))
-    conn.commit()
-    conn.close()
-    
