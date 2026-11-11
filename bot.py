@@ -440,7 +440,7 @@ async def cancel_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# --- SUPERCHARGED INTERACTIVE ADMIN BOT WITH PREVIEW BROADCAST ---
+# --- SUPERCHARGED INTERACTIVE ADMIN BOT WITH PREVIEW & BUTTON SUPPORT ---
 async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         return
@@ -516,7 +516,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(
             "📢 <b>MFUMO WA KUTUMA MATANGAZO (BROADCAST HUB)</b>\n\n"
             "Tuma hapa <b>Ujumbe, Picha, au Video</b> unayotaka kuwatumia watumiaji wote.\n\n"
-            "Bot itakuonyesha hakiki (preview) kwanza kabla ya kutuma rasmi.",
+            "💡 <i>Kama unahitaji kitufe (button) kwenye tangazo lako,andika ujumbe wako kisha Weka mstari wa mwisho kwa mfumo huu:</i>\n"
+            "<code>Jina la Kitufe | https://linkyako.com</code>\n\n"
+            "Tuma ujumbe wako sasa kuanza hakiki (preview):",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
@@ -582,27 +584,35 @@ async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     return ConversationHandler.END
 
-# --- INTERACTIVE BROADCAST PREVIEW WORKFLOW ---
+# --- TRUE PREVIEW BROADCAST WORKFLOW ---
 async def admin_receive_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         return ConversationHandler.END
     
-    # Save the message object in context for later broadcasting
     context.user_data['broadcast_msg'] = update.message
 
     await update.message.reply_text(
         "👁️ <b>HAKIKI YA TANGAZO (PREVIEW)</b>\n\n"
-        "Hivi ndivyo ujumbe wako utakavyowafikia wanachama wote hapo chini:",
+        "Hivi ndivyo ujumbe wako utakavyowafikia wanachama wote hapa chini:",
         parse_mode="HTML"
     )
 
-    # Echo preview back to admin
+    # Parse potential inline button from text/caption
+    text_content = update.message.text or update.message.caption or ""
+    preview_markup = None
+    if "|" in text_content:
+        parts = text_content.split("\n")
+        last_line = parts[-1]
+        if "|" in last_line:
+            btn_text, btn_url = last_line.split("|", 1)
+            preview_markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text.strip(), url=btn_url.strip())]])
+
     if update.message.photo:
-        await update.message.reply_photo(photo=update.message.photo[-1].file_id, caption=update.message.caption or "", parse_mode="HTML")
+        await update.message.reply_photo(photo=update.message.photo[-1].file_id, caption=text_content, parse_mode="HTML", reply_markup=preview_markup)
     elif update.message.video:
-        await update.message.reply_video(video=update.message.video.file_id, caption=update.message.caption or "", parse_mode="HTML")
+        await update.message.reply_video(video=update.message.video.file_id, caption=text_content, parse_mode="HTML", reply_markup=preview_markup)
     else:
-        await update.message.reply_text(update.message.text, parse_mode="HTML")
+        await update.message.reply_text(text_content, parse_mode="HTML", reply_markup=preview_markup)
 
     await update.message.reply_text(
         "⚙️ <b>Ungependa kufanya nini sasa?</b>",
@@ -631,14 +641,23 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
 
     status_msg = await query.message.edit_text(f"🚀 Inaanza kutuma tangazo kwa watumiaji {len(users)}...")
 
+    text_content = msg_obj.text or msg_obj.caption or ""
+    final_markup = None
+    if "|" in text_content:
+        parts = text_content.split("\n")
+        last_line = parts[-1]
+        if "|" in last_line:
+            btn_text, btn_url = last_line.split("|", 1)
+            final_markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text.strip(), url=btn_url.strip())]])
+
     for uid in users:
         try:
             if msg_obj.photo:
-                await context.bot.send_photo(chat_id=uid, photo=msg_obj.photo[-1].file_id, caption=msg_obj.caption or "", parse_mode="HTML")
+                await context.bot.send_photo(chat_id=uid, photo=msg_obj.photo[-1].file_id, caption=text_content, parse_mode="HTML", reply_markup=final_markup)
             elif msg_obj.video:
-                await context.bot.send_video(chat_id=uid, video=msg_obj.video.file_id, caption=msg_obj.caption or "", parse_mode="HTML")
+                await context.bot.send_video(chat_id=uid, video=msg_obj.video.file_id, caption=text_content, parse_mode="HTML", reply_markup=final_markup)
             else:
-                await context.bot.send_message(chat_id=uid, text=msg_obj.text, parse_mode="HTML")
+                await context.bot.send_message(chat_id=uid, text=text_content, parse_mode="HTML", reply_markup=final_markup)
             success += 1
             await asyncio.sleep(0.05)
         except Exception:
