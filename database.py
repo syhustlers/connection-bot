@@ -132,14 +132,12 @@ def get_order_details(order_id):
 def is_user_activated(user_id):
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    # Check if referrals >= 10
     cursor.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (str(user_id),))
     ref_count = cursor.fetchone()[0]
     if ref_count >= 10:
         conn.close()
         return True
     
-    # Check if any order is completed
     cursor.execute("SELECT COUNT(*) FROM orders WHERE user_id = ? AND status = 'completed'", (str(user_id),))
     completed_orders = cursor.fetchone()[0]
     conn.close()
@@ -147,4 +145,3 @@ def is_user_activated(user_id):
         return True
         
     return False
-    
