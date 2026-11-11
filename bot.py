@@ -34,6 +34,7 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 WAITING_PHONE = 1
 ADMIN_WAITING_ORDER = 2
+ADMIN_WAITING_BROADCAST = 3
 
 # --- CUSTOM REGION LAYOUT ---
 REGIONS = [
@@ -319,7 +320,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     elif query.data == "activation3":
         await query.message.edit_text(
-            "💳 <b>ACTIVATION YA HARAKA - TZS 3,000</b>\n\n"
+            "💳 <b>ACTIVATION YA HARAKA - TZS 3,500</b>\n\n"
             "Tafadhali weka namba yako ya simu ya mtandao (M-Pesa, TigoPesa, AirtelMoney) ili mfumo ukututumie ombi la malipo moja kwa moja (USSD Push).\n\n"
             "Andika namba yako hapa chini (mfano: 0712345678):",
             parse_mode="HTML",
@@ -377,7 +378,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
     elif query.data == "back" or query.data == "back_to_regions":
-        await query.message.delete()
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
         await query.message.reply_text("✨ <b>Chagua mkoa wako kutoka kwenye orodha hapa chini:</b>", parse_mode="HTML", reply_markup=get_region_keyboard())
 
 async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -400,7 +404,7 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{HARAKAPAY_BASE_URL}/api/v1/collect",
             json={
                 "phone": phone,
-                "amount": 3000,
+                "amount": 3500,
                 "description": "Connection Activation Fee"
             },
             headers={
@@ -413,11 +417,10 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if res_data.get("success"):
             order_id = res_data.get("order_id")
-            save_order(order_id, user_id, phone, 3000, "pending")
+            save_order(order_id, user_id, phone, 3500, "pending")
             await status_msg.edit_text(
                 f"📱 <b>USSD PUSH IMETUMWA!</b>\n\n"
-                f"Weka PIN kwenye simu yako kulipia TZS 3,000.\n"
-                f"Order ID: <code>{order_id}</code>\n\n"
+                f"Weka PIN kwenye simu yako kulipia TZS 3,500.\n\n"
                 f"Baada ya kuweka PIN, bonyeza kitufe hapa chini kukagua kama malipo yamethibitishwa:",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
@@ -437,7 +440,7 @@ async def cancel_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# --- FULLY SUPERCHARGED INTERACTIVE ADMIN BOT (@connectiontzzadminbot) ---
+# --- SUPERCHARGED INTERACTIVE ADMIN BOT WITH PREVIEW BROADCAST ---
 async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         return
@@ -467,7 +470,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 <b>SYSTEM STATISTICS</b>\n\n"
             f"👥 Total Registered Users: <code>{total_users}</code>\n"
             f"🚀 System Status: <b>Online & Stable 24/7</b>\n\n"
-            f"Bonyeza /start kurudi kwenye menyu kuu.",
+            f"Bonyeza kitufe hapa chini kurudi:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
@@ -485,7 +488,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💰 <b>HARAKAPAY WALLET & FLOAT</b>\n\n"
             f"💵 Wallet Balance: <code>TZS {wallet_bal}</code>\n"
             f"💎 Float Balance: <code>TZS {float_bal}</code>\n\n"
-            f"Bonyeza /start kurudi kwenye menyu kuu.",
+            f"Bonyeza kitufe hapa chini kurudi:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
@@ -497,32 +500,32 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👥 <b>WATUMIAJI WA MFUMO</b>\n\n"
             f"📈 Jumla ya Waliojiunga: <code>{total_users}</code>\n"
             f"🆔 ID za Watumiaji wa mwisho 5: <code>{recent}</code>\n\n"
-            f"Bonyeza /start kurudi kwenye menyu kuu.",
+            f"Bonyeza kitufe hapa chini kurudi:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
     elif query.data == "admin_check_order":
         await query.message.edit_text(
             "🔍 <b>ANGALIA ORDER YA MALIPO</b>\n\n"
-            "Tafadhali tuma Order ID (mfano: HP1706123456789) kukagua hali yake kwenye HarakaPay:",
+            "Tafadhali tuma Order ID (mfano: HP1706123456789) kwenye chat hii kukagua hali yake kwenye HarakaPay:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
         return ADMIN_WAITING_ORDER
     elif query.data == "admin_broadcast_prompt":
         await query.message.edit_text(
-            "📢 <b>MATANGAZO (BROADCAST)</b>\n\n"
-            "Tuma ujumbe wako kwa kuandika amri hii kwenye Admin Bot:\n"
-            "<code>/broadcast Ujumbe wako hapa...</code>\n\n"
-            "(Unaweza pia ku-reply kwenye picha au ujumbe wowote kisha utume /broadcast)",
+            "📢 <b>MFUMO WA KUTUMA MATANGAZO (BROADCAST HUB)</b>\n\n"
+            "Tuma hapa <b>Ujumbe, Picha, au Video</b> unayotaka kuwatumia watumiaji wote.\n\n"
+            "Bot itakuonyesha hakiki (preview) kwanza kabla ya kutuma rasmi.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
+        return ADMIN_WAITING_BROADCAST
     elif query.data == "admin_clean":
         await query.message.edit_text(
             "🔄 <b>USAFISHAJI WA MFUMO</b>\n\n"
             "Kache na kumbukumbu zote za muda mfupi zimesafishwa. Mfumo upo safi na unafanya kazi kwa kasi ya juu.\n\n"
-            "Bonyeza /start kurudi kwenye menyu kuu.",
+            "Bonyeza kitufe hapa chini kurudi:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
@@ -573,39 +576,92 @@ async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     else:
         await update.message.reply_text(
-            f"❌ Order ID <code>{order_id} haipatikani kwenye database ya mfumo.</code>\n(Hali ya API: {api_status})",
+            f"❌ Order ID <code>{order_id}</code> haipatikani kwenye database.\n(Hali ya API: {api_status})",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KUBWA", callback_data="admin_home")]])
         )
     return ConversationHandler.END
 
-async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, main_app):
+# --- INTERACTIVE BROADCAST PREVIEW WORKFLOW ---
+async def admin_receive_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
-        return
+        return ConversationHandler.END
     
-    text = " ".join(context.args)
-    if not text and not update.message.reply_to_message:
-        await update.message.reply_text("⚠️ Andika ujumbe wa broadcast au reply kwenye picha!")
+    # Save the message object in context for later broadcasting
+    context.user_data['broadcast_msg'] = update.message
+
+    await update.message.reply_text(
+        "👁️ <b>HAKIKI YA TANGAZO (PREVIEW)</b>\n\n"
+        "Hivi ndivyo ujumbe wako utakavyowafikia wanachama wote hapo chini:",
+        parse_mode="HTML"
+    )
+
+    # Echo preview back to admin
+    if update.message.photo:
+        await update.message.reply_photo(photo=update.message.photo[-1].file_id, caption=update.message.caption or "", parse_mode="HTML")
+    elif update.message.video:
+        await update.message.reply_video(video=update.message.video.file_id, caption=update.message.caption or "", parse_mode="HTML")
+    else:
+        await update.message.reply_text(update.message.text, parse_mode="HTML")
+
+    await update.message.reply_text(
+        "⚙️ <b>Ungependa kufanya nini sasa?</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚀 TUMA KWA WOTE SASA", callback_data="admin_confirm_broadcast")],
+            [InlineKeyboardButton("❌ GHAIRI / SITISHA", callback_data="admin_cancel_broadcast")]
+        ])
+    )
+    return ConversationHandler.END
+
+async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if str(query.from_user.id) != ADMIN_ID:
+        return
+    await query.answer()
+
+    msg_obj = context.user_data.get('broadcast_msg')
+    if not msg_obj:
+        await query.message.edit_text("❌ Hakuna ujumbe uliopatikana wa kutuma. Tafadhali jaribu tena.")
         return
 
     users = get_all_users()
     success = 0
     failed = 0
 
-    status_msg = await update.message.reply_text(f"🚀 Inatuma kwa watumiaji {len(users)}...")
+    status_msg = await query.message.edit_text(f"🚀 Inaanza kutuma tangazo kwa watumiaji {len(users)}...")
 
     for uid in users:
         try:
-            if update.message.reply_to_message:
-                await main_app.bot.copy_message(chat_id=uid, from_chat_id=update.effective_chat.id, message_id=update.message.reply_to_message.message_id)
+            if msg_obj.photo:
+                await context.bot.send_photo(chat_id=uid, photo=msg_obj.photo[-1].file_id, caption=msg_obj.caption or "", parse_mode="HTML")
+            elif msg_obj.video:
+                await context.bot.send_video(chat_id=uid, video=msg_obj.video.file_id, caption=msg_obj.caption or "", parse_mode="HTML")
             else:
-                await main_app.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+                await context.bot.send_message(chat_id=uid, text=msg_obj.text, parse_mode="HTML")
             success += 1
             await asyncio.sleep(0.05)
         except Exception:
             failed += 1
 
-    await status_msg.edit_text(f"✅ Imekamilika!\n\nImetumika: {success}\nImeshindikana: {failed}")
+    await status_msg.edit_text(
+        f"✅ <b>TANGAZO LIMETUMWA KIKAMILIFU!</b>\n\n"
+        f"📤 Imefanikiwa Kutumika: <code>{success}</code>\n"
+        f"❌ Imeshindikana: <code>{failed}</code>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KWENYE MENYU", callback_data="admin_home")]])
+    )
+
+async def admin_cancel_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if str(query.from_user.id) != ADMIN_ID:
+        return
+    await query.answer()
+    await query.message.edit_text(
+        "❌ <b>Utumaji wa tangazo umesitishwa. Hakuna kilichotumwa.</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KWENYE MENYU", callback_data="admin_home")]])
+    )
 
 
 # --- FLASK WEB SERVER ---
@@ -645,6 +701,14 @@ async def main():
         fallbacks=[]
     )
 
+    admin_broadcast_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^admin_broadcast_prompt$")],
+        states={
+            ADMIN_WAITING_BROADCAST: [MessageHandler(filters.ALL & ~filters.COMMAND, admin_receive_broadcast_content)]
+        },
+        fallbacks=[]
+    )
+
     # Main Bot Handlers
     main_app.add_handler(CommandHandler("start", start))
     main_app.add_handler(CallbackQueryHandler(age_callback, pattern="^age_"))
@@ -655,8 +719,10 @@ async def main():
     # Admin Bot Handlers
     admin_app.add_handler(CommandHandler("start", admin_start))
     admin_app.add_handler(admin_conv_handler)
+    admin_app.add_handler(admin_broadcast_conv)
+    admin_app.add_handler(CallbackQueryHandler(admin_confirm_broadcast_callback, pattern="^admin_confirm_broadcast$"))
+    admin_app.add_handler(CallbackQueryHandler(admin_cancel_broadcast_callback, pattern="^admin_cancel_broadcast$"))
     admin_app.add_handler(CallbackQueryHandler(admin_callback))
-    admin_app.add_handler(CommandHandler("broadcast", lambda u, c: admin_broadcast(u, c, main_app)))
 
     await main_app.initialize()
     await admin_app.initialize()
