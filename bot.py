@@ -246,7 +246,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(query.from_user.id)
 
     if query.data == "get_connection":
-        # Check if user is already verified/activated
         if is_user_activated(user_id):
             await query.message.reply_text(
                 "🎉 <b>AKAUNTI YAKO IMEWEZESHWA KIKAMILIFU!</b> ✅\n\n"
@@ -259,7 +258,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # 4-step italicized cinematic loading sequence
         msg = await query.message.reply_text("<i>🔍 Kuchunguza seva za usalama...</i>", parse_mode="HTML")
         await asyncio.sleep(1)
         msg = await msg.edit_text("<i>🔄 Inatafuta data za mtumiaji...</i>", parse_mode="HTML")
@@ -330,7 +328,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
         return WAITING_PHONE
-    elif query.startswith("check_pay_"):
+    elif query.data.startswith("check_pay_"):
         order_id = query.data.split("_")[2]
         status_msg = await query.message.reply_text("<i>🔄 Inakagua hali ya malipo kupitia HarakaPay...</i>", parse_mode="HTML")
         try:
@@ -357,7 +355,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"Hali ya sasa: <code>{status}</code>\nTafadhali thibitisha malipo kwenye simu yako kisha uguse tena kitufe cha kukagua hapa chini.",
                         parse_mode="HTML",
                         reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔄 ANGALIAPIA MALIPO", callback_data=f"check_pay_{order_id}")],
+                            [InlineKeyboardButton("🔄 ANGALIA TENA MALIPO", callback_data=f"check_pay_{order_id}")],
                             [InlineKeyboardButton("🔙 RUDI", callback_data="back_to_error")]
                         ])
                     )
@@ -378,10 +376,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 RUDI", callback_data="back")]
             ])
         )
-    elif query.data == "back":
+    elif query.data == "back" or query.data == "back_to_regions":
+        await query.message.delete()
         await query.message.reply_text("✨ <b>Chagua mkoa wako kutoka kwenye orodha hapa chini:</b>", parse_mode="HTML", reply_markup=get_region_keyboard())
-    elif query.data == "back_to_regions":
-        await query.message.reply_text("✨ <b>Umerudi kwenye orodha kuu ya mikoa. Chagua mkoa wako:</b>", parse_mode="HTML", reply_markup=get_region_keyboard())
 
 async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -550,7 +547,6 @@ async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE
     order_id = update.message.text.strip()
     order_data = get_order_details(order_id)
     
-    # Also check status live on HarakaPay
     api_status = "Unknown"
     try:
         res = requests.get(
