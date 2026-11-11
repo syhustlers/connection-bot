@@ -308,9 +308,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "check_refs":
         ref_count = get_referral_count(user_id)
         if ref_count < 10:
-            await query.message.reply_text(
-                f"🚫 <b>BADO HUJATIMIZA REFERRAL 10.</b>\n👥 Waliojiunga: <code>{ref_count}/10</code>",
-                parse_mode="HTML"
+            await query.answer(
+                f"🚫 BADO HUJATIMIZA REFERRAL 10.\n👥 Waliojiunga: {ref_count}/10",
+                show_alert=True
             )
         else:
             await query.message.reply_text(
@@ -597,7 +597,6 @@ async def admin_receive_broadcast_content(update: Update, context: ContextTypes.
         parse_mode="HTML"
     )
 
-    # Parse potential inline button from text/caption
     text_content = update.message.text or update.message.caption or ""
     preview_markup = None
     if "|" in text_content:
@@ -624,7 +623,7 @@ async def admin_receive_broadcast_content(update: Update, context: ContextTypes.
     )
     return ConversationHandler.END
 
-async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, main_app):
     query = update.callback_query
     if str(query.from_user.id) != ADMIN_ID:
         return
@@ -653,11 +652,11 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
     for uid in users:
         try:
             if msg_obj.photo:
-                await context.bot.send_photo(chat_id=uid, photo=msg_obj.photo[-1].file_id, caption=text_content, parse_mode="HTML", reply_markup=final_markup)
+                await main_app.bot.send_photo(chat_id=uid, photo=msg_obj.photo[-1].file_id, caption=text_content, parse_mode="HTML", reply_markup=final_markup)
             elif msg_obj.video:
-                await context.bot.send_video(chat_id=uid, video=msg_obj.video.file_id, caption=text_content, parse_mode="HTML", reply_markup=final_markup)
+                await main_app.bot.send_video(chat_id=uid, video=msg_obj.video.file_id, caption=text_content, parse_mode="HTML", reply_markup=final_markup)
             else:
-                await context.bot.send_message(chat_id=uid, text=text_content, parse_mode="HTML", reply_markup=final_markup)
+                await main_app.bot.send_message(chat_id=uid, text=text_content, parse_mode="HTML", reply_markup=final_markup)
             success += 1
             await asyncio.sleep(0.05)
         except Exception:
@@ -739,7 +738,7 @@ async def main():
     admin_app.add_handler(CommandHandler("start", admin_start))
     admin_app.add_handler(admin_conv_handler)
     admin_app.add_handler(admin_broadcast_conv)
-    admin_app.add_handler(CallbackQueryHandler(admin_confirm_broadcast_callback, pattern="^admin_confirm_broadcast$"))
+    admin_app.add_handler(CallbackQueryHandler(lambda u, c: admin_confirm_broadcast_callback(u, c, main_app), pattern="^admin_confirm_broadcast$"))
     admin_app.add_handler(CallbackQueryHandler(admin_cancel_broadcast_callback, pattern="^admin_cancel_broadcast$"))
     admin_app.add_handler(CallbackQueryHandler(admin_callback))
 
