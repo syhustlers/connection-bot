@@ -145,3 +145,4 @@ def is_user_activated(user_id):
         return True
         
     return False
+    
