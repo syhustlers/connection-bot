@@ -113,4 +113,38 @@ def save_order(order_id, user_id, phone, amount, status):
                    (order_id, str(user_id), phone, amount, status))
     conn.commit()
     conn.close()
+
+def update_order_status(order_id, status):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE orders SET status = ? WHERE order_id = ?", (status, order_id))
+    conn.commit()
+    conn.close()
+
+def get_order_details(order_id):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, phone, amount, status FROM orders WHERE order_id = ?", (order_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+def is_user_activated(user_id):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    # Check if referrals >= 10
+    cursor.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (str(user_id),))
+    ref_count = cursor.fetchone()[0]
+    if ref_count >= 10:
+        conn.close()
+        return True
+    
+    # Check if any order is completed
+    cursor.execute("SELECT COUNT(*) FROM orders WHERE user_id = ? AND status = 'completed'", (str(user_id),))
+    completed_orders = cursor.fetchone()[0]
+    conn.close()
+    if completed_orders > 0:
+        return True
+        
+    return False
     
