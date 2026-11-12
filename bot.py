@@ -26,7 +26,7 @@ MAIN_BOT_TOKEN = "8050903104:AAH0KH4ah-bdLkkNBoW2pMop3FO5-H2DN-4"
 ADMIN_BOT_TOKEN = "8900606629:AAFrZXxBockQJSAJ8SqwUid98lNFt3XL4Co"
 ADMIN_ID = "8231186202"
 CPA_LINK = "https://tinyurl.com/Activebot"
-TARGET_SITE = "https://www.tanzaniaraha.com/"
+TARGET_SITE = "https://www.exotictanzania.com/"
 HARAKAPAY_API_KEY = "hpk_29f08857e1613f2df534581540097759168284249880fa85"
 HARAKAPAY_BASE_URL = "https://harakapay.net"
 
@@ -250,7 +250,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_user_activated(user_id):
             await query.message.reply_text(
                 "🎉 <b>AKAUNTI YAKO IMEWEZESHWA KIKAMILIFU!</b> ✅\n\n"
-                "Uthibitisho wako umekubaliwa kwenye mfumo. Bonyeza kitufe kilicho hapa chini kufungua tovuti rasmi ya kuunganishwa na warembo moja kwa moja! 💃🔥",
+                "Uthibitisho wako umekubaliwa kwenye mfumo. Bonyeza kitufe kilicho hapa chini kufungua tovuti rasmi ya kuunganishwa na warembo moja kwa moja! (Tumia VPN )💃🔥",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🟢 FUNGUA LINK YA CONNECTION", url=TARGET_SITE)],
