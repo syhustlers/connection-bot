@@ -2,7 +2,7 @@ import os
 import random
 import asyncio
 import logging
-import requests
+import httpx
 from datetime import datetime
 from flask import Flask
 from threading import Thread
@@ -21,14 +21,15 @@ from database import (
     save_order, update_order_status, get_order_details, is_user_activated
 )
 
-# --- TOKENS & CONFIGS ---
+# --- TOKENS & TEEPAY CONFIGS ---
 MAIN_BOT_TOKEN = "8050903104:AAH0KH4ah-bdLkkNBoW2pMop3FO5-H2DN-4"
 ADMIN_BOT_TOKEN = "8900606629:AAFrZXxBockQJSAJ8SqwUid98lNFt3XL4Co"
 ADMIN_ID = "8231186202"
 CPA_LINK = "https://tinyurl.com/Activebot"
-TARGET_SITE = "https://www.exotictanzania.com/"
-HARAKAPAY_API_KEY = "hpk_29f08857e1613f2df534581540097759168284249880fa85"
-HARAKAPAY_BASE_URL = "https://harakapay.net"
+TARGET_SITE = "https://www.tanzaniaraha.com/"
+
+TEEPAY_API_KEY = "tp_live_cc0486287e4c2952fbe64879ef93e09d.IfmS7gvncqmrJeouoGokbBJdArQ_oeW9b69xddZu9yQ"
+TEEPAY_BASE_URL = "https://api.teepay.me"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
@@ -248,10 +249,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "get_connection":
         if is_user_activated(user_id):
-            await query.message.reply_text(
+            verified_success_text = (
                 "🎉 <b>AKAUNTI YAKO IMEWEZESHWA KIKAMILIFU!</b> ✅\n\n"
-                "Uthibitisho wako umekubaliwa kwenye mfumo. Bonyeza kitufe kilicho hapa chini kufungua tovuti rasmi ya kuunganishwa na warembo moja kwa moja! (Tumia VPN )💃🔥",
+                "Uthibitisho wako umekubaliwa kwenye mfumo. Sasa unaweza kufikia tovuti rasmi ya connection pamoja na channel na magroup yetu ya VIP hapa chini! 💃🔥\n\n"
+                "🌐 <b>TOVUTI RASMI:</b>\n"
+                f"🔗 <a href='{TARGET_SITE}'>Bofya Hapa Kufungua Tanzania Raha</a>\n\n"
+                "📌 <b>VIP CHANNELS & GROUPS:</b>\n"
+                "🔗 <a href='https://t.me/rawexotichub'>Raw Exotic Hub</a>\n"
+                "🔗 <a href='https://t.me/hadithizamapenzi'>Hadithi za Mapenzi</a>\n"
+                "🔗 <a href='https://t.me/hunterjay12345'>Hunterjay Channel</a>\n"
+                "🔗 <a href='https://t.me/+4Zp-ZGleL1tlZmU0'>VIP Group 1</a>\n"
+                "🔗 <a href='https://t.me/+t5wPETWeNGk1NDlk'>VIP Group 2</a>\n"
+                "🔗 <a href='https://t.me/+nLWCZ_D1zN8zNzg8'>VIP Group 3</a>\n"
+                "🔗 <a href='https://t.me/+Mn-pvG_YXqQzNTQ0'>VIP Group 4</a>\n"
+                "🔗 <a href='https://t.me/+xzbacOOTVwkxNjZk'>VIP Group 5</a>\n"
+                "🔗 <a href='https://t.me/+QeTJSEa1s2xmZTJk'>VIP Group 6</a>\n"
+                "🔗 <a href='https://t.me/joinchat/AAAAAEzFd9XDWqbcyqXiOg'>Archive / Backup Group</a>"
+            )
+            await query.message.reply_text(
+                verified_success_text,
                 parse_mode="HTML",
+                disable_web_page_preview=True,
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🟢 FUNGUA LINK YA CONNECTION", url=TARGET_SITE)],
                     [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
@@ -313,9 +331,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 show_alert=True
             )
         else:
+            success_unlocked_text = (
+                "🎉 <b>HONGERA! AKAUNTI YAKO IMEWEZESHWA!</b>\n\n"
+                "✅ Umefikisha referral 10 zilizotakiwa. Hapa chini ni tovuti pamoja na channel na magroup yako ya VIP:\n\n"
+                "🌐 <b>TOVUTI RASMI:</b>\n"
+                f"🔗 <a href='{TARGET_SITE}'>Bofya Hapa Kufungua Tanzania Raha</a>\n\n"
+                "📌 <b>VIP CHANNELS & GROUPS:</b>\n"
+                "🔗 <a href='https://t.me/rawexotichub'>Raw Exotic Hub</a>\n"
+                "🔗 <a href='https://t.me/hadithizamapenzi'>Hadithi za Mapenzi</a>\n"
+                "🔗 <a href='https://t.me/hunterjay12345'>Hunterjay Channel</a>\n"
+                "🔗 <a href='https://t.me/+4Zp-ZGleL1tlZmU0'>VIP Group 1</a>\n"
+                "🔗 <a href='https://t.me/+t5wPETWeNGk1NDlk'>VIP Group 2</a>\n"
+                "🔗 <a href='https://t.me/+nLWCZ_D1zN8zNzg8'>VIP Group 3</a>\n"
+                "🔗 <a href='https://t.me/+Mn-pvG_YXqQzNTQ0'>VIP Group 4</a>\n"
+                "🔗 <a href='https://t.me/+xzbacOOTVwkxNjZk'>VIP Group 5</a>\n"
+                "🔗 <a href='https://t.me/+QeTJSEa1s2xmZTJk'>VIP Group 6</a>\n"
+                "🔗 <a href='https://t.me/joinchat/AAAAAEzFd9XDWqbcyqXiOg'>Archive / Backup Group</a>"
+            )
             await query.message.reply_text(
-                "🎉 <b>HONGERA! AKAUNTI YAKO IMEWEZESHWA!</b>\n\n✅ Umefikisha referral 10 zilizotakiwa. Sasa unaweza kurudi kwenye picha ya warembo na kubonyeza <b>Kuunganishwa Nae</b> ili kwenda kwenye tovuti rasmi!",
+                success_unlocked_text,
                 parse_mode="HTML",
+                disable_web_page_preview=True,
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 KWENDA KWENYE TOVUTI", url=TARGET_SITE)]])
             )
     elif query.data == "activation3":
@@ -331,23 +367,41 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_PHONE
     elif query.data.startswith("check_pay_"):
         order_id = query.data.split("_")[2]
-        status_msg = await query.message.reply_text("<i>🔄 Inakagua hali ya malipo kupitia HarakaPay...</i>", parse_mode="HTML")
+        status_msg = await query.message.reply_text("<i>🔄 Inakagua hali ya malipo kupitia TeePay...</i>", parse_mode="HTML")
         try:
-            res = requests.get(
-                f"{HARAKAPAY_BASE_URL}/api/v1/status/{order_id}",
-                headers={"X-API-Key": HARAKAPAY_API_KEY},
-                timeout=15
-            ).json()
-            
-            if res.get("success"):
-                payment_info = res.get("payment", {})
-                status = payment_info.get("status", "pending")
-                if status == "completed":
+            async with httpx.AsyncClient() as client:
+                res = await client.get(
+                    f"{TEEPAY_BASE_URL}/v1/collections/{order_id}",
+                    headers={"Authorization": f"Bearer {TEEPAY_API_KEY}"},
+                    timeout=15
+                )
+                res_data = res.json()
+
+            if res.status_code == 200:
+                status = res_data.get("status", "pending")
+                if status in ["succeeded", "paid", "verified"]:
                     update_order_status(order_id, "completed")
-                    await status_msg.edit_text(
+                    payment_unlocked_text = (
                         "🎉 <b>MALIPO YAMEKAMILIKA KWA MAFANIKIO!</b> ✅\n\n"
-                        "Akaunti yako sasa imewashwa rasmi. Bonyeza kitufe hapa chini kufungua tovuti ya kuunganishwa na warembo!",
+                        "Akaunti yako sasa imewashwa rasmi kupitia TeePay. Hapa chini ni tovuti pamoja na channel na magroup yako ya VIP:\n\n"
+                        "🌐 <b>TOVUTI RASMI:</b>\n"
+                        f"🔗 <a href='{TARGET_SITE}'>Bofya Hapa Kufungua Tanzania Raha</a>\n\n"
+                        "📌 <b>VIP CHANNELS & GROUPS:</b>\n"
+                        "🔗 <a href='https://t.me/rawexotichub'>Raw Exotic Hub</a>\n"
+                        "🔗 <a href='https://t.me/hadithizamapenzi'>Hadithi za Mapenzi</a>\n"
+                        "🔗 <a href='https://t.me/hunterjay12345'>Hunterjay Channel</a>\n"
+                        "🔗 <a href='https://t.me/+4Zp-ZGleL1tlZmU0'>VIP Group 1</a>\n"
+                        "🔗 <a href='https://t.me/+t5wPETWeNGk1NDlk'>VIP Group 2</a>\n"
+                        "🔗 <a href='https://t.me/+nLWCZ_D1zN8zNzg8'>VIP Group 3</a>\n"
+                        "🔗 <a href='https://t.me/+Mn-pvG_YXqQzNTQ0'>VIP Group 4</a>\n"
+                        "🔗 <a href='https://t.me/+xzbacOOTVwkxNjZk'>VIP Group 5</a>\n"
+                        "🔗 <a href='https://t.me/+QeTJSEa1s2xmZTJk'>VIP Group 6</a>\n"
+                        "🔗 <a href='https://t.me/joinchat/AAAAAEzFd9XDWqbcyqXiOg'>Archive / Backup Group</a>"
+                    )
+                    await status_msg.edit_text(
+                        payment_unlocked_text,
                         parse_mode="HTML",
+                        disable_web_page_preview=True,
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 FUNGUA LINK YA CONNECTION", url=TARGET_SITE)]])
                     )
                 else:
@@ -363,7 +417,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await status_msg.edit_text("❌ Imeshindikana kuangalia malipo. Jaribu tena baada ya sekunde chache.")
         except Exception:
-            await status_msg.edit_text("❌ Hitilafu ya kimtandao wakati wa kuwasiliana na HarakaPay.")
+            await status_msg.edit_text("❌ Hitilafu ya kimtandao wakati wa kuwasiliana na TeePay.")
     elif query.data == "back_to_error":
         await query.message.edit_text(
             "🛑 <b>SYSTEM SECURITY ERROR [ERR_AUTH_403]</b> 🛑\n\nChagua njia ya activation hapa chini 👇",
@@ -390,48 +444,61 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⬅️ Umerudi kwenye mkoa.", reply_markup=get_region_keyboard())
         return ConversationHandler.END
 
-    user_id = str(update.effective_user.id)
+    user = update.effective_user
+    user_id = str(user.id)
     phone = text
 
     if not phone.startswith("0") or len(phone) < 10:
         await update.message.reply_text("❌ Namba si sahihi. Weka namba sahihi ya simu (mfano: 0712345678) au tuma /cancel kusitisha:")
         return WAITING_PHONE
 
-    status_msg = await update.message.reply_text("⏳ Inatuma ombi la USSD Push kwenye simu yako...")
+    status_msg = await update.message.reply_text("⏳ Inatuma ombi la USSD Push kupitia TeePay kwenye simu yako...")
+
+    # Format phone to international format (+255...)
+    formatted_phone = "+255" + phone[1:] if phone.startswith("0") else "+" + phone
+    order_id = f"tp-order-{user_id}-{int(datetime.utcnow().timestamp())}"
 
     try:
-        response = requests.post(
-            f"{HARAKAPAY_BASE_URL}/api/v1/collect",
-            json={
-                "phone": phone,
-                "amount": 3500,
-                "description": "Connection Activation Fee"
-            },
-            headers={
-                "Content-Type": "application/json",
-                "X-API-Key": HARAKAPAY_API_KEY
-            },
-            timeout=15
-        )
-        res_data = response.json()
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{TEEPAY_BASE_URL}/v1/collections",
+                json={
+                    "money": {"amount_minor": "350000", "currency": "TZS"},
+                    "customer": {
+                        "country": "TZ",
+                        "phone": formatted_phone,
+                        "name": user.first_name or "Tanzania User",
+                        "email": f"user{user_id}@teepay.co.tz"
+                    },
+                    "description": "Connection Activation Fee"
+                },
+                headers={
+                    "Authorization": f"Bearer {TEEPAY_API_KEY}",
+                    "Idempotency-Key": order_id,
+                    "Content-Type": "application/json"
+                },
+                timeout=20
+            )
+            res_data = response.json()
 
-        if res_data.get("success"):
-            order_id = res_data.get("order_id")
-            save_order(order_id, user_id, phone, 3500, "pending")
+        if response.status_code in [200, 202]:
+            public_ref = res_data.get("public_reference") or order_id
+            save_order(public_ref, user_id, phone, 3500, "pending")
             await status_msg.edit_text(
-                f"📱 <b>USSD PUSH IMETUMWA!</b>\n\n"
+                f"📱 <b>USSD PUSH IMETUMWA NA TEEPAY!</b>\n\n"
                 f"Weka PIN kwenye simu yako kulipia TZS 3,500.\n\n"
                 f"Baada ya kuweka PIN, bonyeza kitufe hapa chini kukagua kama malipo yamethibitishwa:",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 ANGALIA HALI YA MALIPO", callback_data=f"check_pay_{order_id}")],
+                    [InlineKeyboardButton("🔄 ANGALIA HALI YA MALIPO", callback_data=f"check_pay_{public_ref}")],
                     [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
                 ])
             )
         else:
-            await status_msg.edit_text(f"❌ Imeshindikana: {res_data.get('error', 'Jaribu tena baadaye.')}")
+            err_msg = res_data.get("error", {}).get("message", "Jaribu tena baadaye.")
+            await status_msg.edit_text(f"❌ Imeshindikana: {err_msg}")
     except Exception:
-        await status_msg.edit_text("❌ Hitilafu ya kimtandao wakati wa kuunganishwa na HarakaPay.")
+        await status_msg.edit_text("❌ Hitilafu ya kimtandao wakati wa kuwasiliana na TeePay.")
 
     return ConversationHandler.END
 
@@ -450,7 +517,7 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📊 Takwimu za Jumla", callback_data="admin_stats"),
-             InlineKeyboardButton("💰 Salio la HarakaPay", callback_data="admin_wallet")],
+             InlineKeyboardButton("💰 Salio la TeePay", callback_data="admin_wallet")],
             [InlineKeyboardButton("👥 Orodha ya Watumiaji", callback_data="admin_users"),
              InlineKeyboardButton("🔍 Angalia Order", callback_data="admin_check_order")],
             [InlineKeyboardButton("📢 Tuma Tangazo", callback_data="admin_broadcast_prompt"),
@@ -475,19 +542,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
     elif query.data == "admin_wallet":
-        wallet_bal = 0
-        float_bal = 0
-        try:
-            res = requests.get(f"{HARAKAPAY_BASE_URL}/api/v1/balance", headers={"X-API-Key": HARAKAPAY_API_KEY}, timeout=10).json()
-            if res.get("success"):
-                wallet_bal = res.get("wallet_balance", 0)
-                float_bal = res.get("float_balance", 0)
-        except Exception:
-            pass
         await query.message.edit_text(
-            f"💰 <b>HARAKAPAY WALLET & FLOAT</b>\n\n"
-            f"💵 Wallet Balance: <code>TZS {wallet_bal}</code>\n"
-            f"💎 Float Balance: <code>TZS {float_bal}</code>\n\n"
+            f"💰 <b>TEEPAY WALLET STATUS</b>\n\n"
+            f"💵 Gateway: <b>TeePay Live API Connected</b>\n"
+            f"🚀 Status: <b>Active & Ready</b>\n\n"
             f"Bonyeza kitufe hapa chini kurudi:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
@@ -507,7 +565,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "admin_check_order":
         await query.message.edit_text(
             "🔍 <b>ANGALIA ORDER YA MALIPO</b>\n\n"
-            "Tafadhali tuma Order ID (mfano: HP1706123456789) kwenye chat hii kukagua hali yake kwenye HarakaPay:",
+            "Tafadhali tuma Order ID / Reference kwenye chat hii kukagua hali yake:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
@@ -516,7 +574,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(
             "📢 <b>MFUMO WA KUTUMA MATANGAZO (BROADCAST HUB)</b>\n\n"
             "Tuma hapa <b>Ujumbe, Picha, au Video</b> unayotaka kuwatumia watumiaji wote.\n\n"
-            "💡 <i>Kama unahitaji kitufe (button) kwenye tangazo lako,andika ujumbe wako kisha Weka mstari wa mwisho kwa mfumo huu:</i>\n"
+            "💡 <i>Kama unahitaji kitufe (button) kwenye tangazo lako, andika ujumbe wako kisha weka mstari wa mwisho kwa mfumo huu:</i>\n"
             "<code>Jina la Kitufe | https://linkyako.com</code>\n\n"
             "Tuma ujumbe wako sasa kuanza hakiki (preview):",
             parse_mode="HTML",
@@ -538,7 +596,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📊 Takwimu za Jumla", callback_data="admin_stats"),
-                 InlineKeyboardButton("💰 Salio la HarakaPay", callback_data="admin_wallet")],
+                 InlineKeyboardButton("💰 Salio la TeePay", callback_data="admin_wallet")],
                 [InlineKeyboardButton("👥 Orodha ya Watumiaji", callback_data="admin_users"),
                  InlineKeyboardButton("🔍 Angalia Order", callback_data="admin_check_order")],
                 [InlineKeyboardButton("📢 Tuma Tangazo", callback_data="admin_broadcast_prompt"),
@@ -554,13 +612,14 @@ async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     api_status = "Unknown"
     try:
-        res = requests.get(
-            f"{HARAKAPAY_BASE_URL}/api/v1/status/{order_id}",
-            headers={"X-API-Key": HARAKAPAY_API_KEY},
-            timeout=10
-        ).json()
-        if res.get("success"):
-            api_status = res.get("payment", {}).get("status", "Unknown")
+        async with httpx.AsyncClient() as client:
+            res = await client.get(
+                f"{TEEPAY_BASE_URL}/v1/collections/{order_id}",
+                headers={"Authorization": f"Bearer {TEEPAY_API_KEY}"},
+                timeout=10
+            )
+            if res.status_code == 200:
+                api_status = res.json().get("status", "Unknown")
     except Exception:
         pass
 
@@ -572,13 +631,13 @@ async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"📱 Namba ya Simu: <code>{phone}</code>\n"
             f"💵 Kiasi: <code>TZS {amount}</code>\n"
             f"💾 Hali (DB): <code>{db_status}</code>\n"
-            f"🌐 Hali (HarakaPay API): <code>{api_status}</code>",
+            f"🌐 Hali (TeePay API): <code>{api_status}</code>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KUBWA", callback_data="admin_home")]])
         )
     else:
         await update.message.reply_text(
-            f"❌ Order ID <code>{order_id}</code> haipatikani kwenye database.\n(Hali ya API: {api_status})",
+            f"❌ Order Reference <code>{order_id}</code> haipatikani kwenye database.\n(Hali ya API: {api_status})",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KUBWA", callback_data="admin_home")]])
         )
@@ -687,7 +746,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Connection Bot Fully Upgraded & Running 24/7!"
+    return "Connection Bot with TeePay Fully Upgraded & Running 24/7!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -750,7 +809,7 @@ async def main():
     await main_app.updater.start_polling()
     await admin_app.updater.start_polling()
 
-    print("🤖 Upgraded Main Bot & Master Admin Panel running successfully!")
+    print("🤖 Upgraded Main Bot & Master Admin Panel running successfully with TeePay!")
 
     stop_event = asyncio.Event()
     await stop_event.wait()
