@@ -366,21 +366,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_PHONE
     elif query.data.startswith("check_pay_"):
-        session_id = query.data.split("_")[2]
+        public_ref = query.data.split("_")[2]
         status_msg = await query.message.reply_text("<i>🔄 Inakagua hali ya malipo kupitia TeePay...</i>", parse_mode="HTML")
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.get(
-                    f"{TEEPAY_BASE_URL}/v1/checkout-sessions/{session_id}",
+                    f"{TEEPAY_BASE_URL}/v1/collections/{public_ref}",
                     headers={"Authorization": f"Bearer {TEEPAY_API_KEY}"},
                     timeout=15
                 )
                 res_data = res.json()
 
             if res.status_code == 200:
-                status = res_data.get("status", "open")
-                if status == "paid":
-                    update_order_status(session_id, "completed")
+                status = res_data.get("status", "pending")
+                if status == "succeeded":
+                    update_order_status(public_ref, "completed")
                     payment_unlocked_text = (
                         "🎉 <b>MALIPO YAMEKAMILIKA KWA MAFANIKIO!</b> ✅\n\n"
                         "Akaunti yako sasa imewashwa rasmi kupitia TeePay. Hapa chini ni tovuti pamoja na channel na magroup yako ya VIP:\n\n"
@@ -406,11 +406,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 else:
                     await status_msg.edit_text(
-                        f"⏳ <b>MALIPO BADO YAJAKAMILIKA (Status: {status})</b>\n\n"
-                        f"Tafadhali kamilisha malipo kupitia link ya malipo uliyopewa, kisha bonyeza kitufe hapa chini kukagua tena.",
+                        f"⏳ <b>MALIPO YANAENDELEA (PENDING)</b>\n\n"
+                        f"Hali ya sasa: <code>{status}</code>\nTafadhali thibitisha malipo kwenye simu yako kisha uguse tena kitufe cha kukagua hapa chini.",
                         parse_mode="HTML",
                         reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔄 ANGALIA TENA MALIPO", callback_data=f"check_pay_{session_id}")],
+                            [InlineKeyboardButton("🔄 ANGALIA TENA MALIPO", callback_data=f"check_pay_{public_ref}")],
                             [InlineKeyboardButton("🔙 RUDI", callback_data="back_to_error")]
                         ])
                     )
@@ -452,27 +452,24 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Namba si sahihi. Weka namba sahihi ya simu (mfano: 0712345678) au tuma /cancel kusitisha:")
         return WAITING_PHONE
 
-    status_msg = await update.message.reply_text("⏳ Inatengeneza link ya malipo ya TeePay...")
+    status_msg = await update.message.reply_text("⏳ Inatuma ombi la USSD Push kupitia TeePay kwenye simu yako...")
 
     formatted_phone = "+255" + phone[1:] if phone.startswith("0") else "+" + phone
-    idempotency_key = f"tp-checkout-{user_id}-{int(datetime.utcnow().timestamp())}"
+    idempotency_key = f"tp-push-{user_id}-{int(datetime.utcnow().timestamp())}"
 
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{TEEPAY_BASE_URL}/v1/checkout-sessions",
+                f"{TEEPAY_BASE_URL}/v1/collections",
                 json={
-                    "title": "Tanzania Connection Activation",
-                    "description": "Connection Activation Fee",
-                    "amount_minor": "350000",
-                    "currency": "TZS",
-                    "expires_in": 3600,
-                    "reference": idempotency_key,
+                    "money": {"amount_minor": "350000", "currency": "TZS"},
                     "customer": {
+                        "country": "TZ",
+                        "phone": formatted_phone,
                         "name": user.first_name or "Tanzania User",
-                        "email": f"user{user_id}@teepay.co.tz",
-                        "phone": formatted_phone
-                    }
+                        "email": f"user{user_id}@teepay.co.tz"
+                    },
+                    "description": "Connection Activation Fee"
                 },
                 headers={
                     "Authorization": f"Bearer {TEEPAY_API_KEY}",
@@ -483,19 +480,16 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             res_data = response.json()
 
-        if response.status_code in [200, 201]:
-            session_id = res_data.get("id")
-            checkout_url = res_data.get("checkout_url")
-            save_order(session_id, user_id, phone, 3500, "open")
-            
+        if response.status_code in [200, 202]:
+            public_ref = res_data.get("public_reference") or idempotency_key
+            save_order(public_ref, user_id, phone, 3500, "pending")
             await status_msg.edit_text(
-                f"💳 <b>LINK YA MALIPO IMETENGENEZWA!</b>\n\n"
-                f"Bofya kitufe hapa chini kulipia <b>TZS 3,500</b> kupitia ukurasa salama wa TeePay:\n\n"
-                f"Baada ya kumaliza kulipia, rudi hapa na bonyeza <b>Angalia Hali ya Malipo</b>:",
+                f"📱 <b>USSD PUSH IMETUMWA NA TEEPAY!</b>\n\n"
+                f"Weka PIN kwenye simu yako kulipia TZS 3,500.\n\n"
+                f"Baada ya kuweka PIN, bonyeza kitufe hapa chini kukagua kama malipo yamethibitishwa:",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💳 LIPIA HAPA (TEEPAY CHECKOUT)", url=checkout_url)],
-                    [InlineKeyboardButton("🔄 ANGALIA HALI YA MALIPO", callback_data=f"check_pay_{session_id}")],
+                    [InlineKeyboardButton("🔄 ANGALIA HALI YA MALIPO", callback_data=f"check_pay_{public_ref}")],
                     [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
                 ])
             )
@@ -549,7 +543,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "admin_wallet":
         await query.message.edit_text(
             f"💰 <b>TEEPAY WALLET STATUS</b>\n\n"
-            f"💵 Gateway: <b>TeePay Checkout Sessions Active</b>\n"
+            f"💵 Gateway: <b>TeePay USSD Push Active</b>\n"
             f"🚀 Status: <b>Online & Ready</b>\n\n"
             f"Bonyeza kitufe hapa chini kurudi:",
             parse_mode="HTML",
@@ -569,8 +563,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif query.data == "admin_check_order":
         await query.message.edit_text(
-            "🔍 <b>ANGALIA SESSION YA MALIPO</b>\n\n"
-            "Tafadhali tuma Checkout Session ID kwenye chat hii kukagua hali yake:",
+            "🔍 <b>ANGALIA PUBLIC REFERENCE YA MALIPO</b>\n\n"
+            "Tafadhali tuma Public Reference (mfano: TP8K2M4QZ1) kwenye chat hii kukagua hali yake:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
@@ -612,14 +606,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         return ConversationHandler.END
-    session_id = update.message.text.strip()
-    order_data = get_order_details(session_id)
+    public_ref = update.message.text.strip()
+    order_data = get_order_details(public_ref)
     
     api_status = "Unknown"
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(
-                f"{TEEPAY_BASE_URL}/v1/checkout-sessions/{session_id}",
+                f"{TEEPAY_BASE_URL}/v1/collections/{public_ref}",
                 headers={"Authorization": f"Bearer {TEEPAY_API_KEY}"},
                 timeout=10
             )
@@ -631,7 +625,7 @@ async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE
     if order_data:
         uid, phone, amount, db_status = order_data
         await update.message.reply_text(
-            f"📦 <b>MAELEZO YA CHECKOUT SESSION: {session_id}</b>\n\n"
+            f"📦 <b>MAELEZO YA COLLECTION: {public_ref}</b>\n\n"
             f"👤 User ID: <code>{uid}</code>\n"
             f"📱 Namba ya Simu: <code>{phone}</code>\n"
             f"💵 Kiasi: <code>TZS {amount}</code>\n"
@@ -642,7 +636,7 @@ async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     else:
         await update.message.reply_text(
-            f"❌ Session ID <code>{session_id}</code> haipatikani kwenye database.\n(Hali ya API: {api_status})",
+            f"❌ Reference <code>{public_ref}</code> haipatikani kwenye database.\n(Hali ya API: {api_status})",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KUBWA", callback_data="admin_home")]])
         )
@@ -751,7 +745,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Connection Bot with TeePay Checkout Fully Upgraded & Running 24/7!"
+    return "Connection Bot with TeePay USSD Push Fully Upgraded & Running 24/7!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -814,7 +808,7 @@ async def main():
     await main_app.updater.start_polling()
     await admin_app.updater.start_polling()
 
-    print("🤖 Upgraded Main Bot & Master Admin Panel running successfully with TeePay Checkout!")
+    print("🤖 Upgraded Main Bot & Master Admin Panel running successfully with TeePay USSD Push!")
 
     stop_event = asyncio.Event()
     await stop_event.wait()
