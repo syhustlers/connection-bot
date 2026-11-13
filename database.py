@@ -50,6 +50,13 @@ def add_referral(referrer_id, referred_id):
         return False
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
+    # Check if this user already was referred by ANYONE to prevent switching/gaming
+    cursor.execute("SELECT COUNT(*) FROM referrals WHERE referred_id = ?", (str(referred_id),))
+    already_referred = cursor.fetchone()[0]
+    if already_referred > 0:
+        conn.close()
+        return False
+
     try:
         cursor.execute("INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)", 
                        (str(referrer_id), str(referred_id)))
