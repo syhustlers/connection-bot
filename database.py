@@ -1,8 +1,10 @@
 import sqlite3
 from datetime import datetime
 
+DB_PATH = "/data/bot_database.db"
+
 def init_db():
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -47,7 +49,7 @@ def init_db():
     conn.close()
 
 def add_user(user_id, username, first_name, date):
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO users (user_id, username, first_name, joined_date) 
@@ -63,7 +65,7 @@ def add_referral(referrer_id, referred_id):
     if str(referrer_id) == str(referred_id):
         return False
     
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
     cursor.execute("SELECT COUNT(*) FROM referrals WHERE referred_id = ?", (str(referred_id),))
@@ -83,7 +85,7 @@ def add_referral(referrer_id, referred_id):
         return False
 
 def get_referral_count(referrer_id):
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (str(referrer_id),))
     count = cursor.fetchone()[0]
@@ -91,7 +93,7 @@ def get_referral_count(referrer_id):
     return count
 
 def get_all_users():
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT user_id FROM users")
     users = [row[0] for row in cursor.fetchall()]
@@ -99,7 +101,7 @@ def get_all_users():
     return users
 
 def get_total_users_count():
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM users")
     count = cursor.fetchone()[0]
@@ -107,7 +109,7 @@ def get_total_users_count():
     return count
 
 def get_seen_images(user_id):
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT image_url FROM seen_images WHERE user_id = ?", (str(user_id),))
     images = [row[0] for row in cursor.fetchall()]
@@ -115,21 +117,21 @@ def get_seen_images(user_id):
     return images
 
 def add_seen_image(user_id, image_url):
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("INSERT OR IGNORE INTO seen_images (user_id, image_url) VALUES (?, ?)", (str(user_id), image_url))
     conn.commit()
     conn.close()
 
 def reset_seen_images(user_id):
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM seen_images WHERE user_id = ?", (str(user_id),))
     conn.commit()
     conn.close()
 
 def save_order(order_id, user_id, phone, amount, status):
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO orders (order_id, user_id, phone, amount, status) VALUES (?, ?, ?, ?, ?)",
                    (order_id, str(user_id), phone, amount, status))
@@ -137,14 +139,14 @@ def save_order(order_id, user_id, phone, amount, status):
     conn.close()
 
 def update_order_status(order_id, status):
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("UPDATE orders SET status = ? WHERE order_id = ?", (status, order_id))
     conn.commit()
     conn.close()
 
 def get_order_details(order_id):
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT user_id, phone, amount, status FROM orders WHERE order_id = ?", (order_id,))
     row = cursor.fetchone()
@@ -152,7 +154,7 @@ def get_order_details(order_id):
     return row
 
 def is_user_activated(user_id):
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (str(user_id),))
     ref_count = cursor.fetchone()[0]
@@ -169,7 +171,7 @@ def is_user_activated(user_id):
     return False
 
 def log_broadcast_click(user_id, target_url):
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("INSERT INTO broadcast_clicks (user_id, target_url, clicked_at) VALUES (?, ?, ?)",
                    (str(user_id), target_url, str(datetime.utcnow())))
@@ -177,10 +179,9 @@ def log_broadcast_click(user_id, target_url):
     conn.close()
 
 def get_click_count_for_url(target_url):
-    conn = sqlite3.connect("bot_database.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM broadcast_clicks WHERE target_url = ?", (target_url,))
     count = cursor.fetchone()[0]
     conn.close()
     return count
-    
