@@ -4,7 +4,7 @@ import asyncio
 import logging
 import requests
 from datetime import datetime, timedelta
-from flask import Flask
+from flask import Flask, request, redirect
 from threading import Thread
 
 from telegram import (
@@ -224,7 +224,6 @@ async def age_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("❌ Samahani, huwezi kutumia bot hii ikiwa una chini ya miaka 18.")
         return
 
-    # Force Subscribe Check Gate
     is_joined = await check_membership(context.bot, query.from_user.id)
     if not is_joined:
         await query.message.edit_text(
@@ -312,7 +311,6 @@ async def region_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
         ])
     )
-    # Track message for 48h cleanup
     context.user_data.setdefault('tracked_msgs', []).append((sent_msg.message_id, datetime.utcnow()))
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -375,7 +373,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "activation1":
         await query.message.edit_text(
             "🔐 <b>MAELEZO YA ACTIVATION [1]</b>\n\n"
-            "Tafadhali fuata maelezo na maagizo yote yaliyopo kwenye mfumo wa tovuti yetu ili kukamilisha hatua hii kwa usahihi. 🎯",
+            "Tafadhali fuata maelezo na maagizo yote yaliyopo kwenye mfumo wetu ili kukamilisha hatua hii kwa usahihi. 🎯",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📥 FUNGUA TOVUTI", url=CPA_LINK)],
@@ -480,10 +478,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         await query.message.reply_text("✨ <b>Chagua mkoa wako kutoka kwenye orodha hapa chini:</b>", parse_mode="HTML", reply_markup=get_region_keyboard())
-    elif query.data.startswith("track_click_"):
-        url_encoded = query.data.replace("track_click_", "").replace("_", "/")
-        log_broadcast_click(user_id, url_encoded)
-        await query.answer("🌐 Inafungua link...", show_alert=False)
 
 async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -541,7 +535,7 @@ async def cancel_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# --- ADVANCED SINGLE ADMIN PANEL & MEDIA BROADCAST ---
+# --- ADMIN PANEL ---
 async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         return
@@ -691,7 +685,7 @@ async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     return ConversationHandler.END
 
-# --- MEDIA-COMPATIBLE BROADCAST PREVIEW & RE-UPLOAD WORKFLOW ---
+# --- DIRECT URL BROADCAST PREVIEW & RE-UPLOAD WORKFLOW ---
 async def admin_receive_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         return ConversationHandler.END
@@ -718,8 +712,10 @@ async def admin_receive_broadcast_content(update: Update, context: ContextTypes.
         if "|" in last_line:
             btn_text, btn_url = last_line.split("|", 1)
             clean_text = "\n".join(parts[:-1]).strip()
-            encoded_url = btn_url.strip().replace("/", "_")
-            preview_markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text.strip(), callback_data=f"track_click_{encoded_url}")]])
+            destination_url = btn_url.strip()
+            base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://connection-bot.onrender.com")
+            tracking_url = f"{base_url}/click?url={destination_url}"
+            preview_markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text.strip(), url=tracking_url)]])
 
     if msg.photo:
         await msg.reply_photo(photo=msg.photo[-1].file_id, caption=clean_text, parse_mode="HTML", reply_markup=preview_markup)
@@ -758,6 +754,7 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
     raw_text = msg_obj.text or msg_obj.caption or ""
     clean_text = raw_text
     final_markup = None
+    destination_url = ""
 
     if "|" in raw_text:
         parts = raw_text.split("\n")
@@ -765,10 +762,11 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
         if "|" in last_line:
             btn_text, btn_url = last_line.split("|", 1)
             clean_text = "\n".join(parts[:-1]).strip()
-            encoded_url = btn_url.strip().replace("/", "_")
-            final_markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text.strip(), callback_data=f"track_click_{encoded_url}")]])
+            destination_url = btn_url.strip()
+            base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://connection-bot.onrender.com")
+            tracking_url = f"{base_url}/click?url={destination_url}"
+            final_markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text.strip(), url=tracking_url)]])
 
-    # Download media binary if present so main bot can re-upload correctly
     media_file_bytes = None
     media_type = None
     if msg_obj.photo:
@@ -789,11 +787,11 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
             else:
                 await main_app.bot.send_message(chat_id=uid, text=clean_text, parse_mode="HTML", reply_markup=final_markup)
             success += 1
-            await asyncio.sleep(0.04) # Rate limit protection
+            await asyncio.sleep(0.04)
         except Exception:
             failed += 1
 
-    clicks = get_click_count_for_url(btn_url.strip()) if "|" in raw_text else 0
+    clicks = get_click_count_for_url(destination_url) if destination_url else 0
     await status_msg.edit_text(
         f"✅ <b>TANGAZO LIMETUMWA KIKAMILIFU!</b>\n\n"
         f"📤 Imefanikiwa Kutumika: <code>{success}</code>\n"
@@ -815,15 +813,30 @@ async def admin_cancel_broadcast_callback(update: Update, context: ContextTypes.
     )
 
 
-# --- BACKGROUND AUTOMATION (WEEKLY BACKUPS & 48H CLEANUP) ---
+# --- FLASK WEB SERVER WITH CLICK ANALYTICS REDIRECT ---
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Connection Bot Fully Upgraded & Running 24/7!"
+
+@app.route('/click')
+def click_redirect():
+    target_url = request.args.get('url', TARGET_SITE)
+    log_broadcast_click("user", target_url)
+    return redirect(target_url)
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+
+# --- AUTOMATION LOOP ---
 async def background_automation_loop(main_app):
     while True:
-        await asyncio.sleep(3600) # Check every hour
+        await asyncio.sleep(3600)
         now = datetime.utcnow()
-        
-        # 1. 48-Hour Message Cleanup across user sessions in memory context if active
-        # 2. Weekly Database Backup to Admin
-        if now.weekday() == 0 and now.hour == 3: # Every Monday at 3 AM UTC
+        if now.weekday() == 0 and now.hour == 3:
             if os.path.exists("bot_database.db"):
                 try:
                     with open("bot_database.db", "rb") as db_file:
@@ -836,17 +849,6 @@ async def background_automation_loop(main_app):
                 except Exception:
                     pass
 
-
-# --- FLASK WEB SERVER ---
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Connection Bot Fully Upgraded & Running 24/7!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
 
 # --- UNIFIED ASYNC MAIN RUNNER ---
 async def main():
@@ -905,7 +907,6 @@ async def main():
     await main_app.updater.start_polling()
     await admin_app.updater.start_polling()
 
-    # Start background automation tasks
     asyncio.create_task(background_automation_loop(main_app))
 
     print("🤖 Upgraded Main Bot & Master Admin Panel running successfully with zero errors!")
