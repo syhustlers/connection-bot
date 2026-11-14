@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import datetime
 
-DB_PATH = "/data/bot_database.db"
+DB_PATH = "bot_database.db"
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -185,3 +185,4 @@ def get_click_count_for_url(target_url):
     count = cursor.fetchone()[0]
     conn.close()
     return count
+    
