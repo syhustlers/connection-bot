@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime
 
 def init_db():
     conn = sqlite3.connect("bot_database.db")
@@ -34,23 +35,37 @@ def init_db():
             status TEXT
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS broadcast_clicks (
+            click_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            target_url TEXT,
+            clicked_at TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
 def add_user(user_id, username, first_name, date):
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, joined_date) VALUES (?, ?, ?, ?)", 
-                   (str(user_id), username, first_name, date))
+    cursor.execute("""
+        INSERT INTO users (user_id, username, first_name, joined_date) 
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET 
+        username=excluded.username, 
+        first_name=excluded.first_name
+    """, (str(user_id), username, first_name, date))
     conn.commit()
     conn.close()
 
 def add_referral(referrer_id, referred_id):
     if str(referrer_id) == str(referred_id):
         return False
+    
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    # Check if this user already was referred by ANYONE to prevent switching/gaming
+    
     cursor.execute("SELECT COUNT(*) FROM referrals WHERE referred_id = ?", (str(referred_id),))
     already_referred = cursor.fetchone()[0]
     if already_referred > 0:
@@ -152,4 +167,20 @@ def is_user_activated(user_id):
         return True
         
     return False
+
+def log_broadcast_click(user_id, target_url):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO broadcast_clicks (user_id, target_url, clicked_at) VALUES (?, ?, ?)",
+                   (str(user_id), target_url, str(datetime.utcnow())))
+    conn.commit()
+    conn.close()
+
+def get_click_count_for_url(target_url):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM broadcast_clicks WHERE target_url = ?", (target_url,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
     
