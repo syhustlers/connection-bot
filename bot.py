@@ -22,14 +22,15 @@ from database import (
     log_broadcast_click, get_click_count_for_url
 )
 
-# --- TOKENS & CONFIGS ---
-MAIN_BOT_TOKEN = "8050903104:AAH0KH4ah-bdLkkNBoW2pMop3FO5-H2DN-4"
-ADMIN_BOT_TOKEN = "8900606629:AAFrZXxBockQJSAJ8SqwUid98lNFt3XL4Co"
-ADMIN_ID = "8231186202"
+# --- SECURE ENVIRONMENT CONFIGS (HIDDEN FROM GITHUB) ---
+MAIN_BOT_TOKEN = os.environ.get("MAIN_BOT_TOKEN", "8050903104:AAH0KH4ah-bdLkkNBoW2pMop3FO5-H2DN-4")
+ADMIN_BOT_TOKEN = os.environ.get("ADMIN_BOT_TOKEN", "8900606629:AAFrZXxBockQJSAJ8SqwUid98lNFt3XL4Co")
+ADMIN_ID = os.environ.get("ADMIN_ID", "8231186202")
+HARAKAPAY_API_KEY = os.environ.get("HARAKAPAY_API_KEY", "hpk_29f08857e1613f2df534581540097759168284249880fa85")
+
 CPA_LINK = "https://tinyurl.com/Activebot"
 TARGET_SITE = "https://www.tanzaniaraha.com/"
 REQUIRED_CHANNEL = "@connectiontzz"
-HARAKAPAY_API_KEY = "hpk_29f08857e1613f2df534581540097759168284249880fa85"
 HARAKAPAY_BASE_URL = "https://harakapay.net"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
