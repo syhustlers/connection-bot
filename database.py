@@ -2,7 +2,6 @@ import sqlite3
 import os
 from datetime import datetime
 
-# Persistent storage path on Render disk
 DB_DIR = "/data"
 if not os.path.exists(DB_DIR):
     os.makedirs(DB_DIR, exist_ok=True)
@@ -41,7 +40,7 @@ def init_db():
             phone TEXT,
             amount INTEGER,
             status TEXT,
-            product_id TEXT
+            product_id INTEGER
         )
     """)
     cursor.execute("""
@@ -55,13 +54,16 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS products (
             product_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
             price INTEGER,
-            caption TEXT,
-            media_type TEXT,
-            media_file_id TEXT,
+            sales_media_type TEXT,
+            sales_media_file_id TEXT,
+            sales_caption TEXT,
             button_text TEXT,
-            button_url TEXT,
+            success_media_type TEXT,
+            success_media_file_id TEXT,
+            success_caption TEXT,
+            success_btn_text TEXT,
+            success_btn_url TEXT,
             created_at TEXT
         )
     """)
@@ -84,19 +86,14 @@ def add_user(user_id, username, first_name, date):
 def add_referral(referrer_id, referred_id):
     if str(referrer_id) == str(referred_id):
         return False
-    
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
     cursor.execute("SELECT COUNT(*) FROM referrals WHERE referred_id = ?", (str(referred_id),))
-    already_referred = cursor.fetchone()[0]
-    if already_referred > 0:
+    if cursor.fetchone()[0] > 0:
         conn.close()
         return False
-
     try:
-        cursor.execute("INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)", 
-                       (str(referrer_id), str(referred_id)))
+        cursor.execute("INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)", (str(referrer_id), str(referred_id)))
         conn.commit()
         conn.close()
         return True
@@ -177,18 +174,13 @@ def is_user_activated(user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (str(user_id),))
-    ref_count = cursor.fetchone()[0]
-    if ref_count >= 10:
+    if cursor.fetchone()[0] >= 10:
         conn.close()
         return True
-    
     cursor.execute("SELECT COUNT(*) FROM orders WHERE user_id = ? AND status = 'completed'", (str(user_id),))
-    completed_orders = cursor.fetchone()[0]
+    completed = cursor.fetchone()[0]
     conn.close()
-    if completed_orders > 0:
-        return True
-        
-    return False
+    return completed > 0
 
 def log_broadcast_click(user_id, target_url):
     conn = sqlite3.connect(DB_PATH)
@@ -206,13 +198,13 @@ def get_click_count_for_url(target_url):
     conn.close()
     return count
 
-def save_product(title, price, caption, media_type, media_file_id, button_text, button_url):
+def save_product(price, sales_media_type, sales_media_file_id, sales_caption, button_text, success_media_type, success_media_file_id, success_caption, success_btn_text, success_btn_url):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO products (title, price, caption, media_type, media_file_id, button_text, button_url, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (title, price, caption, media_type, media_file_id, button_text, button_url, str(datetime.utcnow())))
+        INSERT INTO products (price, sales_media_type, sales_media_file_id, sales_caption, button_text, success_media_type, success_media_file_id, success_caption, success_btn_text, success_btn_url, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (price, sales_media_type, sales_media_file_id, sales_caption, button_text, success_media_type, success_media_file_id, success_caption, success_btn_text, success_btn_url, str(datetime.utcnow())))
     prod_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -221,16 +213,8 @@ def save_product(title, price, caption, media_type, media_file_id, button_text, 
 def get_product(product_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT product_id, title, price, caption, media_type, media_file_id, button_text, button_url FROM products WHERE product_id = ?", (product_id,))
+    cursor.execute("SELECT product_id, price, sales_media_type, sales_media_file_id, sales_caption, button_text, success_media_type, success_media_file_id, success_caption, success_btn_text, success_btn_url FROM products WHERE product_id = ?", (product_id,))
     row = cursor.fetchone()
     conn.close()
     return row
-
-def get_all_products():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT product_id, title, price FROM products")
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
     
