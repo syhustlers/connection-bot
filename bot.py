@@ -19,7 +19,7 @@ from database import (
     init_db, add_user, add_referral, get_referral_count, get_all_users, 
     get_total_users_count, get_seen_images, add_seen_image, reset_seen_images, 
     save_order, update_order_status, get_order_details, is_user_activated,
-    log_broadcast_click, get_click_count_for_url
+    log_broadcast_click, get_click_count_for_url, save_product, get_product, get_all_products
 )
 
 # --- SECURE ENVIRONMENT CONFIGS (HIDDEN FROM GITHUB) ---
@@ -35,9 +35,14 @@ HARAKAPAY_BASE_URL = "https://harakapay.net"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
+# Conversation States
 WAITING_PHONE = 1
 ADMIN_WAITING_ORDER = 2
 ADMIN_WAITING_BROADCAST = 3
+ADMIN_WAITING_PRODUCT_TITLE = 4
+ADMIN_WAITING_PRODUCT_PRICE = 5
+ADMIN_WAITING_PRODUCT_CONTENT = 6
+USER_BUYING_PHONE = 7
 
 # Anti-spam cooldown store
 user_cooldowns = {}
@@ -299,7 +304,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(user_id, user.username, user.first_name, str(datetime.utcnow()))
 
     if context.args:
-        ref_id = context.args[0]
+        # Check if deep link is a product buy link (e.g. buy_12)
+        args_text = context.args[0]
+        if args_text.startswith("buy_"):
+            try:
+                prod_id = int(args_text.split("_")[1])
+                prod = get_product(prod_id)
+                if prod:
+                    pid, title, price, caption, media_type, media_file_id, btn_text, btn_url = prod
+                    context.user_data['buying_product_id'] = pid
+                    context.user_data['buying_product_price'] = price
+                    
+                    buy_text = (
+                        f"🛍️ <b>UNAKARIBIA KUNUNUA BIDHAA</b>\n\n"
+                        f"📦 <b>JINA:</b> {title}\n"
+                        f"💵 <b>BEI:</b> TZS {price:,}\n\n"
+                        f"Tafadhali tuma namba yako ya simu ya mtandao (M-Pesa, TigoPesa, AirtelMoney) ili nikutumie ombi la malipo (mfano: 0712345678):"
+                    )
+                    await update.message.reply_text(buy_text, parse_mode="HTML")
+                    return USER_BUYING_PHONE
+            except Exception:
+                pass
+
+        ref_id = args_text
         if add_referral(ref_id, user_id):
             try:
                 await context.bot.send_message(
@@ -335,7 +362,7 @@ async def age_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📢 <b>LAZIMA UJIUNGE NA CHANNEL YETU KWANZA!</b>\n\n"
             f"Ili kuendelea kutumia bot hii, tafadhali jiunge na channel yetu rasmi hapa chini:\n\n"
             f"👉 <a href=\"https://t.me/connectiontzz\">Jiunge na Connection TZZ</a>\n\n"
-            f"Baada ya kujiunga, bonyeza kitufe cha 'Kagua Uanachama' hapa chini:",
+            f"Baada ya kujiunga, bonyeza kitufe cha 'Kagua Uانachama' hapa chini:",
             parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup([
@@ -541,6 +568,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 status = payment_info.get("status", "pending")
                 if status == "completed":
                     update_order_status(order_id, "completed")
+                    
+                    # Check if this order was for a product purchase
+                    order_data = get_order_details(order_id)
+                    if order_data and len(order_data) >= 5 and order_data[4]:
+                        prod_id = order_data[4]
+                        prod = get_product(prod_id)
+                        if prod:
+                            pid, title, price, caption, media_type, media_file_id, btn_text, btn_url = prod
+                            markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, url=btn_url)]]) if btn_text and btn_url else None
+                            
+                            delivery_header = f"🎉 <b>MALIPO YAMEWEZESHWA! HII APA BIDHAA YAKO:</b>\n\n"
+                            full_caption = delivery_header + (caption or "")
+                            
+                            if media_type == "photo" and media_file_id:
+                                await context.bot.send_photo(chat_id=query.from_user.id, photo=media_file_id, caption=full_caption, parse_mode="HTML", reply_markup=markup)
+                            elif media_type == "video" and media_file_id:
+                                await context.bot.send_video(chat_id=query.from_user.id, video=media_file_id, caption=full_caption, parse_mode="HTML", reply_markup=markup)
+                            else:
+                                await context.bot.send_message(chat_id=query.from_user.id, text=full_caption, parse_mode="HTML", reply_markup=markup)
+                    
                     await status_msg.edit_text(
                         get_verified_success_text(),
                         parse_mode="HTML",
@@ -635,6 +682,61 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
+async def receive_buyer_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    user_id = str(update.effective_user.id)
+    phone = text
+
+    if not phone.startswith("0") or len(phone) < 10:
+        await update.message.reply_text("❌ Namba si sahihi. Weka namba sahihi ya simu (mfano: 0712345678):")
+        return USER_BUYING_PHONE
+
+    prod_id = context.user_data.get('buying_product_id')
+    price = context.user_data.get('buying_product_price', 0)
+    prod = get_product(prod_id)
+    if not prod:
+        await update.message.reply_text("❌ Samahani, bidhaa haipatikani tena.")
+        return ConversationHandler.END
+
+    title = prod[1]
+    status_msg = await update.message.reply_text(f"⏳ Inatuma ombi la malipo ya TZS {price:,} kwenye namba yako...")
+
+    try:
+        response = requests.post(
+            f"{HARAKAPAY_BASE_URL}/api/v1/collect",
+            json={
+                "phone": phone,
+                "amount": price,
+                "description": f"Buy Product: {title}"
+            },
+            headers={
+                "Content-Type": "application/json",
+                "X-API-Key": HARAKAPAY_API_KEY
+            },
+            timeout=15
+        )
+        res_data = response.json()
+
+        if res_data.get("success"):
+            order_id = res_data.get("order_id")
+            save_order(order_id, user_id, phone, price, "pending", prod_id)
+            await status_msg.edit_text(
+                f"📱 <b>USSD PUSH IMETUMWA!</b>\n\n"
+                f"Weka PIN kwenye simu yako kulipia TZS {price:,} kwa ajili ya <b>{title}</b>.\n\n"
+                f"Baada ya kuweka PIN, bonyeza kitufe hapa chini kukagua malipo yako:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 ANGALIA HALI YA MALIPO", callback_data=f"check_pay_{order_id}")],
+                    [InlineKeyboardButton("🔙 RUDI MWANZO", callback_data="back_to_regions")]
+                ])
+            )
+        else:
+            await status_msg.edit_text(f"❌ Imeshindikana: {res_data.get('error', 'Jaribu tena baadaye.')}")
+    except Exception:
+        await status_msg.edit_text("❌ Hitilafu ya kimtandao wakati wa kuunganishwa na HarakaPay.")
+
+    return ConversationHandler.END
+
 async def cancel_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Imesitishwa.", reply_markup=get_region_keyboard())
     return ConversationHandler.END
@@ -656,7 +758,8 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("👥 Orodha ya Watumiaji", callback_data="admin_users"),
              InlineKeyboardButton("🔍 Angalia Order", callback_data="admin_check_order")],
             [InlineKeyboardButton("📢 Tuma Tangazo", callback_data="admin_broadcast_prompt"),
-             InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
+             InlineKeyboardButton("🛍️ Unda Bidhhaa (Sell)", callback_data="admin_create_product")],
+            [InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
         ])
     )
 
@@ -671,7 +774,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(
             f"📊 <b>SYSTEM STATISTICS</b>\n\n"
             f"👥 Total Registered Users: <code>{total_users}</code>\n"
-            f"🚀 System Status: <b>Online & Stable 24/7</b>\n\n"
+            f"🚀 System Status: <b>Online & Stable 24/7 (Persistent Disk)</b>\n\n"
             f"Bonyeza kitufe hapa chini kurudi:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
@@ -720,18 +823,25 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📢 <b>MFUMO WA KUTUMA MATANGAZO (BROADCAST HUB)</b>\n\n"
             f"👥 Walengwa waliopo kwenye Database: <b>{total_recipients}</b>\n\n"
             "Tuma hapa <b>Ujumbe, Picha, au Video</b> unayotaka kuwatumia watumiaji wote.\n\n"
-            "💡 <i>Kama unahitaji kitufe (button) kwenye tangazo lako, andika ujumbe wako kisha Weka mstari wa mwisho kwa mfumo huu:</i>\n"
+            "💡 <i>Kama unahitaji kitufe (button) au maandishi ya kuiga (copyable code), tumia mfumo huu kwenye mstari wa mwisho:</i>\n"
             "<code>Jina la Kitufe | https://linkyako.com</code>\n\n"
             "Tuma ujumbe wako sasa kuanza hakiki (preview):",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
         return ADMIN_WAITING_BROADCAST
+    elif query.data == "admin_create_product":
+        await query.message.edit_text(
+            "🛍️ <b>UNDA BIDHAA MPYA YA KUUSHA (SELLING PRODUCT)</b>\n\n"
+            "Tafadhali andika <b>Jina la Bidhaa</b> hapa chini:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
+        )
+        return ADMIN_WAITING_PRODUCT_TITLE
     elif query.data == "admin_clean":
         await query.message.edit_text(
             "🔄 <b>USAFISHAJI WA MFUMO</b>\n\n"
-            "Kache na kumbukumbu zote za muda mfupi zimesafishwa. Mfumo upo safi na unafanya kazi kwa kasi ya juu.\n\n"
-            "Bonyeza kitufe hapa chini kurudi:",
+            "Kache na kumbukumbu zote za muda mfupi zimesafishwa. Mfumo upo safi na unafanya kazi kwa kasi ya juu.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
@@ -748,7 +858,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("👥 Orodha ya Watumiaji", callback_data="admin_users"),
                  InlineKeyboardButton("🔍 Angalia Order", callback_data="admin_check_order")],
                 [InlineKeyboardButton("📢 Tuma Tangazo", callback_data="admin_broadcast_prompt"),
-                 InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
+                 InlineKeyboardButton("🛍️ Unda Bidhhaa (Sell)", callback_data="admin_create_product")],
+                [InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
             ])
         )
 
@@ -771,12 +882,13 @@ async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE
         pass
 
     if order_data:
-        uid, phone, amount, db_status = order_data
+        uid, phone, amount, db_status, prod_id = order_data
         await update.message.reply_text(
             f"📦 <b>MAELEZO YA ORDER: {order_id}</b>\n\n"
             f"👤 User ID: <code>{uid}</code>\n"
             f"📱 Namba ya Simu: <code>{phone}</code>\n"
             f"💵 Kiasi: <code>TZS {amount}</code>\n"
+            f"🛍️ Product ID: <code>{prod_id or 'N/A'}</code>\n"
             f"💾 Hali (DB): <code>{db_status}</code>\n"
             f"🌐 Hali (HarakaPay API): <code>{api_status}</code>",
             parse_mode="HTML",
@@ -790,7 +902,76 @@ async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     return ConversationHandler.END
 
-# --- DIRECT URL BROADCAST PREVIEW & RE-UPLOAD WORKFLOW ---
+# --- ADMIN PRODUCT CREATION CONVERSATION ---
+async def admin_product_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['prod_title'] = update.message.text.strip()
+    await update.message.reply_text("💵 Weka bei ya bidhaa hii kwa TZS (mfano: 5000):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ GHAIRI", callback_data="admin_home")]]))
+    return ADMIN_WAITING_PRODUCT_PRICE
+
+async def admin_product_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        price = int(update.message.text.strip())
+        context.user_data['prod_price'] = price
+    except ValueError:
+        await update.message.reply_text("❌ Tafadhali weka namba sahihi ya bei (mfano: 5000):")
+        return ADMIN_WAITING_PRODUCT_PRICE
+
+    await update.message.reply_text(
+        "📦 Sasa tuma ujumbe wa bidhaa (Ujumbe, Picha, au Video pamoja na maelezo) utakaotumwa kwa mteja akishamaliza kulipia.\n\n"
+        "💡 <i>Kama unahitaji kitufe ndani ya bidhaa hiyo, weka mstari wa mwisho kwa mtindo huu:</i>\n"
+        "<code>Jina la Kitufe | https://linkyako.com</code>",
+        parse_mode="HTML"
+    )
+    return ADMIN_WAITING_PRODUCT_CONTENT
+
+async def admin_product_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    title = context.user_data.get('prod_title')
+    price = context.user_data.get('prod_price')
+
+    raw_text = msg.text or msg.caption or ""
+    caption = raw_text
+    btn_text = None
+    btn_url = None
+
+    if "|" in raw_text:
+        parts = raw_text.split("\n")
+        last_line = parts[-1]
+        if "|" in last_line:
+            btn_text, btn_url = last_line.split("|", 1)
+            caption = "\n".join(parts[:-1]).strip()
+            btn_text = btn_text.strip()
+            btn_url = btn_url.strip()
+
+    media_type = "text"
+    media_file_id = None
+    if msg.photo:
+        media_type = "photo"
+        media_file_id = msg.photo[-1].file_id
+    elif msg.video:
+        media_type = "video"
+        media_file_id = msg.video.file_id
+
+    prod_id = save_product(title, price, caption, media_type, media_file_id, btn_text, btn_url)
+    bot_username = (await context.bot.get_me()).username
+    buy_link = f"https://t.me/{bot_username}?start=buy_{prod_id}"
+
+    await update.message.reply_text(
+        f"✅ <b>BIDHAA IMEWEKWA NA KUTENGENEZWA KIKAMILIFU!</b> 🎉\n\n"
+        f"📦 <b>Jina:</b> {title}\n"
+        f"💵 <b>Bei:</b> TZS {price:,}\n"
+        f"🔗 <b>Link ya Kununua Moja kwa Moja:</b>\n<code>{buy_link}</code>\n\n"
+        "Unaweza kuituma hii link kwenye tangazo lako au broadcast ili wateja wanunue moja kwa moja!",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🛍️ NUNUA BIDHAA HII", url=buy_link)],
+            [InlineKeyboardButton("🔙 RUDI KWENYE MENYU", callback_data="admin_home")]
+        ])
+    )
+    return ConversationHandler.END
+
+
+# --- BROADCAST PREVIEW & RE-UPLOAD WORKFLOW ---
 async def admin_receive_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         return ConversationHandler.END
@@ -923,7 +1104,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Connection Bot Fully Upgraded & Running 24/7!"
+    return "Connection Bot Fully Upgraded & Running 24/7 with Persistent Disk!"
 
 @app.route('/click')
 def click_redirect():
@@ -942,9 +1123,10 @@ async def background_automation_loop(main_app):
         await asyncio.sleep(3600)
         now = datetime.utcnow()
         if now.weekday() == 0 and now.hour == 3:
-            if os.path.exists("bot_database.db"):
+            db_file_path = "/data/bot_database.db"
+            if os.path.exists(db_file_path):
                 try:
-                    with open("bot_database.db", "rb") as db_file:
+                    with open(db_file_path, "rb") as db_file:
                         await main_app.bot.send_document(
                             chat_id=ADMIN_ID,
                             document=db_file,
@@ -973,6 +1155,14 @@ async def main():
         fallbacks=[CommandHandler("cancel", cancel_phone)]
     )
 
+    buyer_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            USER_BUYING_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_buyer_phone)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_phone)]
+    )
+
     admin_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_callback, pattern="^admin_check_order$")],
         states={
@@ -989,8 +1179,18 @@ async def main():
         fallbacks=[]
     )
 
+    admin_product_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^admin_create_product$")],
+        states={
+            ADMIN_WAITING_PRODUCT_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_product_title)],
+            ADMIN_WAITING_PRODUCT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_product_price)],
+            ADMIN_WAITING_PRODUCT_CONTENT: [MessageHandler(filters.ALL & ~filters.COMMAND, admin_product_content)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_phone)]
+    )
+
     # Main Bot Handlers
-    main_app.add_handler(CommandHandler("start", start))
+    main_app.add_handler(buyer_conv_handler)
     main_app.add_handler(CallbackQueryHandler(age_callback, pattern="^age_"))
     main_app.add_handler(conv_handler)
     main_app.add_handler(CallbackQueryHandler(handle_callback))
@@ -1000,6 +1200,7 @@ async def main():
     admin_app.add_handler(CommandHandler("start", admin_start))
     admin_app.add_handler(admin_conv_handler)
     admin_app.add_handler(admin_broadcast_conv)
+    admin_app.add_handler(admin_product_conv)
     admin_app.add_handler(CallbackQueryHandler(lambda u, c: admin_confirm_broadcast_callback(u, c, main_app), pattern="^admin_confirm_broadcast$"))
     admin_app.add_handler(CallbackQueryHandler(admin_cancel_broadcast_callback, pattern="^admin_cancel_broadcast$"))
     admin_app.add_handler(CallbackQueryHandler(admin_callback))
@@ -1014,7 +1215,7 @@ async def main():
 
     asyncio.create_task(background_automation_loop(main_app))
 
-    print("🤖 Upgraded Main Bot & Master Admin Panel running successfully with zero errors!")
+    print("🤖 Upgraded Main Bot & Master Admin Panel running successfully with Persistent Disk storage!")
 
     stop_event = asyncio.Event()
     await stop_event.wait()
