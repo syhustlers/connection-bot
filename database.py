@@ -2,6 +2,7 @@ import sqlite3
 import os
 from datetime import datetime
 
+# Define the persistent directory and database path
 DB_DIR = "/data"
 if not os.path.exists(DB_DIR):
     os.makedirs(DB_DIR, exist_ok=True)
