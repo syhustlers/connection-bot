@@ -1,7 +1,13 @@
 import sqlite3
+import os
 from datetime import datetime
 
-DB_PATH = "bot_database.db"
+# Persistent storage path on Render disk
+DB_DIR = "/data"
+if not os.path.exists(DB_DIR):
+    os.makedirs(DB_DIR, exist_ok=True)
+
+DB_PATH = os.path.join(DB_DIR, "bot_database.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -34,7 +40,8 @@ def init_db():
             user_id TEXT,
             phone TEXT,
             amount INTEGER,
-            status TEXT
+            status TEXT,
+            product_id TEXT
         )
     """)
     cursor.execute("""
@@ -43,6 +50,19 @@ def init_db():
             user_id TEXT,
             target_url TEXT,
             clicked_at TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            product_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            price INTEGER,
+            caption TEXT,
+            media_type TEXT,
+            media_file_id TEXT,
+            button_text TEXT,
+            button_url TEXT,
+            created_at TEXT
         )
     """)
     conn.commit()
@@ -130,11 +150,11 @@ def reset_seen_images(user_id):
     conn.commit()
     conn.close()
 
-def save_order(order_id, user_id, phone, amount, status):
+def save_order(order_id, user_id, phone, amount, status, product_id=None):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO orders (order_id, user_id, phone, amount, status) VALUES (?, ?, ?, ?, ?)",
-                   (order_id, str(user_id), phone, amount, status))
+    cursor.execute("INSERT OR REPLACE INTO orders (order_id, user_id, phone, amount, status, product_id) VALUES (?, ?, ?, ?, ?, ?)",
+                   (order_id, str(user_id), phone, amount, status, product_id))
     conn.commit()
     conn.close()
 
@@ -148,7 +168,7 @@ def update_order_status(order_id, status):
 def get_order_details(order_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, phone, amount, status FROM orders WHERE order_id = ?", (order_id,))
+    cursor.execute("SELECT user_id, phone, amount, status, product_id FROM orders WHERE order_id = ?", (order_id,))
     row = cursor.fetchone()
     conn.close()
     return row
@@ -185,4 +205,32 @@ def get_click_count_for_url(target_url):
     count = cursor.fetchone()[0]
     conn.close()
     return count
+
+def save_product(title, price, caption, media_type, media_file_id, button_text, button_url):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO products (title, price, caption, media_type, media_file_id, button_text, button_url, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (title, price, caption, media_type, media_file_id, button_text, button_url, str(datetime.utcnow())))
+    prod_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return prod_id
+
+def get_product(product_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT product_id, title, price, caption, media_type, media_file_id, button_text, button_url FROM products WHERE product_id = ?", (product_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+def get_all_products():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT product_id, title, price FROM products")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
     
