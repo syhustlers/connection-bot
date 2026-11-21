@@ -1,9 +1,10 @@
 import os
+import time
 import random
 import asyncio
 import logging
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, request, redirect
 from threading import Thread
 
@@ -16,22 +17,23 @@ from telegram.ext import (
 )
 
 from database import (
-    init_db, add_user, add_referral, get_referral_count, get_all_users, 
-    get_total_users_count, get_seen_images, add_seen_image, reset_seen_images, 
+    init_db, add_user, add_referral, get_referral_count, get_all_users,
+    get_total_users_count, get_seen_images, add_seen_image, reset_seen_images,
     save_order, update_order_status, get_order_details, is_user_activated,
-    log_broadcast_click, get_click_count_for_url
+    log_broadcast_click, get_click_count_for_url, DB_PATH
 )
 
-# --- SECURE ENVIRONMENT CONFIGS (HIDDEN FROM GITHUB) ---
-MAIN_BOT_TOKEN = os.environ.get("MAIN_BOT_TOKEN", "8050903104:AAH0KH4ah-bdLkkNBoW2pMop3FO5-H2DN-4")
-ADMIN_BOT_TOKEN = os.environ.get("ADMIN_BOT_TOKEN", "8900606629:AAFrZXxBockQJSAJ8SqwUid98lNFt3XL4Co")
-ADMIN_ID = os.environ.get("ADMIN_ID", "8231186202")
-HARAKAPAY_API_KEY = os.environ.get("HARAKAPAY_API_KEY", "hpk_29f08857e1613f2df534581540097759168284249880fa85")
+# --- ENVIRONMENT CONFIGS ---
+MAIN_BOT_TOKEN = os.environ.get("MAIN_BOT_TOKEN", "")
+ADMIN_BOT_TOKEN = os.environ.get("ADMIN_BOT_TOKEN", "")
+ADMIN_ID = os.environ.get("ADMIN_ID", "")
+STANY_API_KEY = os.environ.get("STANY_API_KEY", "")
+STANY_BASE_URL = os.environ.get("STANY_BASE_URL", "https://host.stanymaxhub.online")
+STANY_CALLBACK_URL = os.environ.get("STANY_CALLBACK_URL", "")
 
 CPA_LINK = "https://tinyurl.com/Activebot"
 TARGET_SITE = "https://www.tanzaniaraha.com/"
 REQUIRED_CHANNEL = "@connectiontzz"
-HARAKAPAY_BASE_URL = "https://harakapay.net"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
@@ -42,6 +44,7 @@ ADMIN_WAITING_BROADCAST = 3
 # Anti-spam cooldown store
 user_cooldowns = {}
 
+
 async def check_antispam(user_id):
     now = datetime.utcnow()
     last_time = user_cooldowns.get(user_id)
@@ -50,12 +53,75 @@ async def check_antispam(user_id):
     user_cooldowns[user_id] = now
     return True
 
+
+def stany_request(method, path, payload=None, max_retries=3):
+    url = f"{STANY_BASE_URL.rstrip('/')}{path}"
+    headers = {
+        "x-api-key": STANY_API_KEY,
+        "Content-Type": "application/json"
+    }
+    retry_codes = {401, 402, 429}
+    delay = 1.0
+
+    for attempt in range(max_retries):
+        resp = requests.request(
+            method=method,
+            url=url,
+            headers=headers,
+            json=payload if payload is not None else None,
+            timeout=15
+        )
+        if resp.status_code in retry_codes and attempt < max_retries - 1:
+            time.sleep(delay)
+            delay *= 2
+            continue
+        return resp
+
+    return resp
+
+
+def extract_payment_ref(data, fallback_ref):
+    if not isinstance(data, dict):
+        return fallback_ref
+    for key in ("reference", "ref", "merchant_ref", "order_id", "transaction_ref", "id"):
+        if data.get(key):
+            return str(data[key])
+    nested = data.get("data") or data.get("payment") or data.get("transaction")
+    if isinstance(nested, dict):
+        for key in ("reference", "ref", "merchant_ref", "order_id", "transaction_ref", "id"):
+            if nested.get(key):
+                return str(nested[key])
+    return fallback_ref
+
+
+def extract_payment_status(data):
+    if not isinstance(data, dict):
+        return "PENDING"
+    candidates = [
+        data.get("status"),
+        data.get("payment_status"),
+        data.get("state"),
+    ]
+    nested = data.get("data") or data.get("payment") or data.get("transaction")
+    if isinstance(nested, dict):
+        candidates.extend([
+            nested.get("status"),
+            nested.get("payment_status"),
+            nested.get("state"),
+        ])
+    for val in candidates:
+        if val:
+            return str(val).upper()
+    return "PENDING"
+
+
 # --- CUSTOM REGION LAYOUT ---
 REGIONS = [
-    "Dar es Salaam", "Arusha", "Mwanza", "Dodoma", "Geita", "Iringa", "Kagera", "Katavi", "Kigoma", 
-    "Kilimanjaro", "Lindi", "Manyara", "Mara", "Mbeya", "Morogoro", "Mtwara", "Njombe", "Pwani", 
+    "Dar es Salaam", "Arusha", "Mwanza", "Dodoma", "Geita", "Iringa", "Kagera", "Katavi", "Kigoma",
+    "Kilimanjaro", "Lindi", "Manyara", "Mara", "Mbeya", "Morogoro", "Mtwara", "Njombe", "Pwani",
     "Rukwa", "Ruvuma", "Shinyanga", "Simiyu", "Singida", "Tabora", "Tanga", "Zanzibar"
 ]
+
 
 def get_region_keyboard():
     keyboard = []
@@ -64,13 +130,14 @@ def get_region_keyboard():
     for count in row_pattern:
         if idx >= len(REGIONS):
             break
-        row = [KeyboardButton(REGIONS[idx+j]) for j in range(min(count, len(REGIONS) - idx))]
+        row = [KeyboardButton(REGIONS[idx + j]) for j in range(min(count, len(REGIONS) - idx))]
         keyboard.append(row)
         idx += count
     while idx < len(REGIONS):
         keyboard.append([KeyboardButton(REGIONS[idx])])
         idx += 1
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 
 NAMES = [
     "Asha", "Neema", "Amina", "Rehema", "Subira", "Zainabu", "Mariam", "Sophia", "Latifa", "Yasmin",
@@ -283,6 +350,7 @@ def get_verified_success_text():
         "👇 <i>Chagua huduma unayotaka hapa chini au rudi kwenye mikoa:</i>"
     )
 
+
 async def check_membership(bot, user_id):
     try:
         member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=int(user_id))
@@ -291,6 +359,7 @@ async def check_membership(bot, user_id):
     except Exception:
         pass
     return False
+
 
 # --- MAIN BOT HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -321,6 +390,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
+
 async def age_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -347,6 +417,7 @@ async def age_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await proceed_to_regions(query.message)
 
+
 async def check_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -361,6 +432,7 @@ async def check_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pass
     await proceed_to_regions(query.message)
 
+
 async def proceed_to_regions(message):
     welcome_text = (
         f"🍑 Karibu kwenye <b>Tanzania Connection Bot</b> 🔞🇹🇿\n\n"
@@ -369,6 +441,7 @@ async def proceed_to_regions(message):
         "👇 <b>Chagua mkoa unaotaka kutoka kwenye orodha hapa chini</b> 👇"
     )
     await message.reply_text(welcome_text, parse_mode="HTML", reply_markup=get_region_keyboard())
+
 
 async def region_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -417,6 +490,7 @@ async def region_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
     context.user_data.setdefault('tracked_msgs', []).append((sent_msg.message_id, datetime.utcnow()))
+
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -527,43 +601,47 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_PHONE
     elif query.data.startswith("check_pay_"):
-        order_id = query.data.split("_")[2]
-        status_msg = await query.message.reply_text("<i>🔄 Inakagua hali ya malipo kupitia HarakaPay...</i>", parse_mode="HTML")
+        order_ref = query.data.split("check_pay_", 1)[1]
+        status_msg = await query.message.reply_text("<i>🔄 Inakagua hali ya malipo kupitia Stany Pay...</i>", parse_mode="HTML")
         try:
-            res = requests.get(
-                f"{HARAKAPAY_BASE_URL}/api/v1/status/{order_id}",
-                headers={"X-API-Key": HARAKAPAY_API_KEY},
-                timeout=15
-            ).json()
-            
-            if res.get("success"):
-                payment_info = res.get("payment", {})
-                status = payment_info.get("status", "pending")
-                if status == "completed":
-                    update_order_status(order_id, "completed")
-                    await status_msg.edit_text(
-                        get_verified_success_text(),
-                        parse_mode="HTML",
-                        disable_web_page_preview=True,
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🟢 FUNGUA TOVUTI YA CONNECTION", url=TARGET_SITE)],
-                            [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
-                        ])
-                    )
-                else:
-                    await status_msg.edit_text(
-                        f"⏳ <b>MALIPO YANAENDELEA (PENDING)</b>\n\n"
-                        f"Hali ya sasa: <code>{status}</code>\nTafadhali thibitisha malipo kwenye simu yako kisha uguse tena kitufe cha kukagua hapa chini.",
-                        parse_mode="HTML",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔄 ANGALIA TENA MALIPO", callback_data=f"check_pay_{order_id}")],
-                            [InlineKeyboardButton("🔙 RUDI", callback_data="back_to_error")]
-                        ])
-                    )
+            resp = await asyncio.to_thread(stany_request, "GET", f"/api/v1/pay/status/{order_ref}")
+            res = resp.json() if resp.content else {}
+            status = extract_payment_status(res)
+
+            if status == "SUCCESS":
+                update_order_status(order_ref, "completed")
+                await status_msg.edit_text(
+                    get_verified_success_text(),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🟢 FUNGUA TOVUTI YA CONNECTION", url=TARGET_SITE)],
+                        [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
+                    ])
+                )
+            elif status == "FAILED":
+                update_order_status(order_ref, "failed")
+                await status_msg.edit_text(
+                    "❌ <b>MALIPO YAMESHINDWA (FAILED)</b>\n\n"
+                    "Ombi la malipo halikukamilika. Tafadhali jaribu tena au chagua njia nyingine ya activation.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 JARIBU TENA MALIPO", callback_data="activation3")],
+                        [InlineKeyboardButton("🔙 RUDI", callback_data="back_to_error")]
+                    ])
+                )
             else:
-                await status_msg.edit_text("❌ Imeshindikana kuangalia malipo. Jaribu tena baada ya sekunde chache.")
+                await status_msg.edit_text(
+                    f"⏳ <b>MALIPO YANAENDELEA ({status})</b>\n\n"
+                    "Tafadhali thibitisha malipo kwenye simu yako kisha uguse tena kitufe cha kukagua hapa chini.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 ANGALIA TENA MALIPO", callback_data=f"check_pay_{order_ref}")],
+                        [InlineKeyboardButton("🔙 RUDI", callback_data="back_to_error")]
+                    ])
+                )
         except Exception:
-            await status_msg.edit_text("❌ Hitilafu ya kimtandao wakati wa kuwasiliana na HarakaPay.")
+            await status_msg.edit_text("❌ Hitilafu ya kimtandao wakati wa kuwasiliana na Stany Pay.")
     elif query.data == "back_to_error":
         await query.message.edit_text(
             "🛑 <b>SYSTEM SECURITY ERROR [ERR_AUTH_403]</b> 🛑\n\nChagua njia ya activation hapa chini 👇",
@@ -584,13 +662,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         await query.message.reply_text("✨ <b>Chagua mkoa wako kutoka kwenye orodha hapa chini:</b>", parse_mode="HTML", reply_markup=get_region_keyboard())
 
+
 async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text in REGIONS:
         await update.message.reply_text("⬅️ Umerudi kwenye mkoa.", reply_markup=get_region_keyboard())
         return ConversationHandler.END
 
-    user_id = str(update.effective_user.id)
+    user = update.effective_user
+    user_id = str(user.id)
     phone = text
 
     if not phone.startswith("0") or len(phone) < 10:
@@ -598,42 +678,43 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_PHONE
 
     status_msg = await update.message.reply_text("⏳ Inatuma ombi la USSD Push kwenye simu yako...")
+    merchant_ref = f"SP_{user_id}_{int(datetime.utcnow().timestamp())}"
+    customer_name = user.full_name or user.first_name or f"User {user_id}"
+
+    payload = {
+        "amount_tzs": 3500,
+        "phone": phone,
+        "customer_name": customer_name,
+        "merchant_ref": merchant_ref,
+        "callback_url": STANY_CALLBACK_URL
+    }
 
     try:
-        response = requests.post(
-            f"{HARAKAPAY_BASE_URL}/api/v1/collect",
-            json={
-                "phone": phone,
-                "amount": 3500,
-                "description": "Connection Activation Fee"
-            },
-            headers={
-                "Content-Type": "application/json",
-                "X-API-Key": HARAKAPAY_API_KEY
-            },
-            timeout=15
-        )
-        res_data = response.json()
+        resp = await asyncio.to_thread(stany_request, "POST", "/api/v1/pay/initiate", payload)
+        res_data = resp.json() if resp.content else {}
 
-        if res_data.get("success"):
-            order_id = res_data.get("order_id")
-            save_order(order_id, user_id, phone, 3500, "pending")
+        if resp.status_code in (200, 201) and res_data.get("success", True):
+            order_ref = extract_payment_ref(res_data, merchant_ref)
+            save_order(order_ref, user_id, phone, 3500, "pending")
             await status_msg.edit_text(
                 f"📱 <b>USSD PUSH IMETUMWA!</b>\n\n"
-                f"Weka PIN kwenye simu yako kulipia TZS 3,500.\n\n"
+                f"Weka PIN kwenye simu yako kulipia TZS 3,500.\n"
+                f"Kumbukumbu: <code>{order_ref}</code>\n\n"
                 f"Baada ya kuweka PIN, bonyeza kitufe hapa chini kukagua kama malipo yamethibitishwa:",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 ANGALIA HALI YA MALIPO", callback_data=f"check_pay_{order_id}")],
+                    [InlineKeyboardButton("🔄 ANGALIA HALI YA MALIPO", callback_data=f"check_pay_{order_ref}")],
                     [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
                 ])
             )
         else:
-            await status_msg.edit_text(f"❌ Imeshindikana: {res_data.get('error', 'Jaribu tena baadaye.')}")
+            err_msg = res_data.get("message") or res_data.get("error") or f"HTTP {resp.status_code}"
+            await status_msg.edit_text(f"❌ Imeshindikana: {err_msg}")
     except Exception:
-        await status_msg.edit_text("❌ Hitilafu ya kimtandao wakati wa kuunganishwa na HarakaPay.")
+        await status_msg.edit_text("❌ Hitilafu ya kimtandao wakati wa kuunganishwa na Stany Pay.")
 
     return ConversationHandler.END
+
 
 async def cancel_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Imesitishwa.", reply_markup=get_region_keyboard())
@@ -642,7 +723,7 @@ async def cancel_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- ADMIN PANEL ---
 async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN_ID:
+    if str(update.effective_user.id) != str(ADMIN_ID):
         return
     total_users = get_total_users_count()
     await update.message.reply_text(
@@ -652,7 +733,7 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📊 Takwimu za Jumla", callback_data="admin_stats"),
-             InlineKeyboardButton("💰 Salio la HarakaPay", callback_data="admin_wallet")],
+             InlineKeyboardButton("💰 Salio la Stany Pay", callback_data="admin_wallet")],
             [InlineKeyboardButton("👥 Orodha ya Watumiaji", callback_data="admin_users"),
              InlineKeyboardButton("🔍 Angalia Order", callback_data="admin_check_order")],
             [InlineKeyboardButton("📢 Tuma Tangazo", callback_data="admin_broadcast_prompt"),
@@ -660,9 +741,10 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
+
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if str(query.from_user.id) != ADMIN_ID:
+    if str(query.from_user.id) != str(ADMIN_ID):
         return
     await query.answer()
 
@@ -677,19 +759,19 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
     elif query.data == "admin_wallet":
-        wallet_bal = 0
-        float_bal = 0
+        profile_info = "Unavailable"
         try:
-            res = requests.get(f"{HARAKAPAY_BASE_URL}/api/v1/balance", headers={"X-API-Key": HARAKAPAY_API_KEY}, timeout=10).json()
-            if res.get("success"):
-                wallet_bal = res.get("wallet_balance", 0)
-                float_bal = res.get("float_balance", 0)
+            resp = await asyncio.to_thread(stany_request, "GET", "/api/v1/me")
+            if resp.status_code == 200 and resp.content:
+                data = resp.json()
+                username = data.get("username", "N/A")
+                balance = data.get("balance", data.get("txCoins", data.get("wallet_balance", "N/A")))
+                profile_info = f"User: <code>{username}</code>\nBalance: <code>{balance}</code>"
         except Exception:
             pass
         await query.message.edit_text(
-            f"💰 <b>HARAKAPAY WALLET & FLOAT</b>\n\n"
-            f"💵 Wallet Balance: <code>TZS {wallet_bal}</code>\n"
-            f"💎 Float Balance: <code>TZS {float_bal}</code>\n\n"
+            f"💰 <b>STANY PAY ACCOUNT & BALANCE</b>\n\n"
+            f"{profile_info}\n\n"
             f"Bonyeza kitufe hapa chini kurudi:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
@@ -709,7 +791,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "admin_check_order":
         await query.message.edit_text(
             "🔍 <b>ANGALIA ORDER YA MALIPO</b>\n\n"
-            "Tafadhali tuma Order ID (mfano: HP1706123456789) kwenye chat hii kukagua hali yake kwenye HarakaPay:",
+            "Tafadhali tuma Order Ref (mfano: SP_123456_1740000000) kwenye chat hii kukagua hali yake kwenye Stany Pay:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
@@ -744,7 +826,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📊 Takwimu za Jumla", callback_data="admin_stats"),
-                 InlineKeyboardButton("💰 Salio la HarakaPay", callback_data="admin_wallet")],
+                 InlineKeyboardButton("💰 Salio la Stany Pay", callback_data="admin_wallet")],
                 [InlineKeyboardButton("👥 Orodha ya Watumiaji", callback_data="admin_users"),
                  InlineKeyboardButton("🔍 Angalia Order", callback_data="admin_check_order")],
                 [InlineKeyboardButton("📢 Tuma Tangazo", callback_data="admin_broadcast_prompt"),
@@ -752,49 +834,47 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
 
+
 async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN_ID:
+    if str(update.effective_user.id) != str(ADMIN_ID):
         return ConversationHandler.END
-    order_id = update.message.text.strip()
-    order_data = get_order_details(order_id)
-    
+    order_ref = update.message.text.strip()
+    order_data = get_order_details(order_ref)
+
     api_status = "Unknown"
     try:
-        res = requests.get(
-            f"{HARAKAPAY_BASE_URL}/api/v1/status/{order_id}",
-            headers={"X-API-Key": HARAKAPAY_API_KEY},
-            timeout=10
-        ).json()
-        if res.get("success"):
-            api_status = res.get("payment", {}).get("status", "Unknown")
+        resp = await asyncio.to_thread(stany_request, "GET", f"/api/v1/pay/status/{order_ref}")
+        if resp.content:
+            api_status = extract_payment_status(resp.json())
     except Exception:
         pass
 
     if order_data:
         uid, phone, amount, db_status = order_data
         await update.message.reply_text(
-            f"📦 <b>MAELEZO YA ORDER: {order_id}</b>\n\n"
+            f"📦 <b>MAELEZO YA ORDER: {order_ref}</b>\n\n"
             f"👤 User ID: <code>{uid}</code>\n"
             f"📱 Namba ya Simu: <code>{phone}</code>\n"
             f"💵 Kiasi: <code>TZS {amount}</code>\n"
             f"💾 Hali (DB): <code>{db_status}</code>\n"
-            f"🌐 Hali (HarakaPay API): <code>{api_status}</code>",
+            f"🌐 Hali (Stany Pay API): <code>{api_status}</code>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KUBWA", callback_data="admin_home")]])
         )
     else:
         await update.message.reply_text(
-            f"❌ Order ID <code>{order_id}</code> haipatikani kwenye database.\n(Hali ya API: {api_status})",
+            f"❌ Order Ref <code>{order_ref}</code> haipatikani kwenye database.\n(Hali ya API: {api_status})",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KUBWA", callback_data="admin_home")]])
         )
     return ConversationHandler.END
 
+
 # --- DIRECT URL BROADCAST PREVIEW & RE-UPLOAD WORKFLOW ---
 async def admin_receive_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN_ID:
+    if str(update.effective_user.id) != str(ADMIN_ID):
         return ConversationHandler.END
-    
+
     msg = update.message
     context.user_data['broadcast_msg_obj'] = msg
 
@@ -839,9 +919,10 @@ async def admin_receive_broadcast_content(update: Update, context: ContextTypes.
     )
     return ConversationHandler.END
 
+
 async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, main_app):
     query = update.callback_query
-    if str(query.from_user.id) != ADMIN_ID:
+    if str(query.from_user.id) != str(ADMIN_ID):
         return
     await query.answer()
 
@@ -906,9 +987,10 @@ async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KWENYE MENYU", callback_data="admin_home")]])
     )
 
+
 async def admin_cancel_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if str(query.from_user.id) != ADMIN_ID:
+    if str(query.from_user.id) != str(ADMIN_ID):
         return
     await query.answer()
     await query.message.edit_text(
@@ -921,15 +1003,18 @@ async def admin_cancel_broadcast_callback(update: Update, context: ContextTypes.
 # --- FLASK WEB SERVER WITH CLICK ANALYTICS REDIRECT ---
 app = Flask(__name__)
 
+
 @app.route('/')
 def home():
     return "Connection Bot Fully Upgraded & Running 24/7!"
+
 
 @app.route('/click')
 def click_redirect():
     target_url = request.args.get('url', TARGET_SITE)
     log_broadcast_click("user", target_url)
     return redirect(target_url)
+
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -942,9 +1027,9 @@ async def background_automation_loop(main_app):
         await asyncio.sleep(3600)
         now = datetime.utcnow()
         if now.weekday() == 0 and now.hour == 3:
-            if os.path.exists("bot_database.db"):
+            if os.path.exists(DB_PATH) and ADMIN_ID:
                 try:
-                    with open("bot_database.db", "rb") as db_file:
+                    with open(DB_PATH, "rb") as db_file:
                         await main_app.bot.send_document(
                             chat_id=ADMIN_ID,
                             document=db_file,
@@ -1018,6 +1103,7 @@ async def main():
 
     stop_event = asyncio.Event()
     await stop_event.wait()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
