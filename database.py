@@ -1,9 +1,12 @@
+import os
 import sqlite3
 from datetime import datetime
 
-DB_PATH = "/data/bot_database.db"
+DB_PATH = os.environ.get("DB_PATH", "/data/bot_database.db")
+
 
 def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True) if os.path.dirname(DB_PATH) else None
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -48,26 +51,28 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 def add_user(user_id, username, first_name, date):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO users (user_id, username, first_name, joined_date) 
+        INSERT INTO users (user_id, username, first_name, joined_date)
         VALUES (?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET 
-        username=excluded.username, 
+        ON CONFLICT(user_id) DO UPDATE SET
+        username=excluded.username,
         first_name=excluded.first_name
     """, (str(user_id), username, first_name, date))
     conn.commit()
     conn.close()
 
+
 def add_referral(referrer_id, referred_id):
     if str(referrer_id) == str(referred_id):
         return False
-    
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     cursor.execute("SELECT COUNT(*) FROM referrals WHERE referred_id = ?", (str(referred_id),))
     already_referred = cursor.fetchone()[0]
     if already_referred > 0:
@@ -75,14 +80,17 @@ def add_referral(referrer_id, referred_id):
         return False
 
     try:
-        cursor.execute("INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)", 
-                       (str(referrer_id), str(referred_id)))
+        cursor.execute(
+            "INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)",
+            (str(referrer_id), str(referred_id))
+        )
         conn.commit()
         conn.close()
         return True
     except sqlite3.IntegrityError:
         conn.close()
         return False
+
 
 def get_referral_count(referrer_id):
     conn = sqlite3.connect(DB_PATH)
@@ -92,6 +100,7 @@ def get_referral_count(referrer_id):
     conn.close()
     return count
 
+
 def get_all_users():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -99,6 +108,7 @@ def get_all_users():
     users = [row[0] for row in cursor.fetchall()]
     conn.close()
     return users
+
 
 def get_total_users_count():
     conn = sqlite3.connect(DB_PATH)
@@ -108,6 +118,7 @@ def get_total_users_count():
     conn.close()
     return count
 
+
 def get_seen_images(user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -116,12 +127,17 @@ def get_seen_images(user_id):
     conn.close()
     return images
 
+
 def add_seen_image(user_id, image_url):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO seen_images (user_id, image_url) VALUES (?, ?)", (str(user_id), image_url))
+    cursor.execute(
+        "INSERT OR IGNORE INTO seen_images (user_id, image_url) VALUES (?, ?)",
+        (str(user_id), image_url)
+    )
     conn.commit()
     conn.close()
+
 
 def reset_seen_images(user_id):
     conn = sqlite3.connect(DB_PATH)
@@ -130,13 +146,17 @@ def reset_seen_images(user_id):
     conn.commit()
     conn.close()
 
+
 def save_order(order_id, user_id, phone, amount, status):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO orders (order_id, user_id, phone, amount, status) VALUES (?, ?, ?, ?, ?)",
-                   (order_id, str(user_id), phone, amount, status))
+    cursor.execute(
+        "INSERT OR REPLACE INTO orders (order_id, user_id, phone, amount, status) VALUES (?, ?, ?, ?, ?)",
+        (order_id, str(user_id), phone, amount, status)
+    )
     conn.commit()
     conn.close()
+
 
 def update_order_status(order_id, status):
     conn = sqlite3.connect(DB_PATH)
@@ -144,6 +164,7 @@ def update_order_status(order_id, status):
     cursor.execute("UPDATE orders SET status = ? WHERE order_id = ?", (status, order_id))
     conn.commit()
     conn.close()
+
 
 def get_order_details(order_id):
     conn = sqlite3.connect(DB_PATH)
@@ -153,6 +174,7 @@ def get_order_details(order_id):
     conn.close()
     return row
 
+
 def is_user_activated(user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -161,22 +183,26 @@ def is_user_activated(user_id):
     if ref_count >= 10:
         conn.close()
         return True
-    
+
     cursor.execute("SELECT COUNT(*) FROM orders WHERE user_id = ? AND status = 'completed'", (str(user_id),))
     completed_orders = cursor.fetchone()[0]
     conn.close()
     if completed_orders > 0:
         return True
-        
+
     return False
+
 
 def log_broadcast_click(user_id, target_url):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO broadcast_clicks (user_id, target_url, clicked_at) VALUES (?, ?, ?)",
-                   (str(user_id), target_url, str(datetime.utcnow())))
+    cursor.execute(
+        "INSERT INTO broadcast_clicks (user_id, target_url, clicked_at) VALUES (?, ?, ?)",
+        (str(user_id), target_url, str(datetime.utcnow()))
+    )
     conn.commit()
     conn.close()
+
 
 def get_click_count_for_url(target_url):
     conn = sqlite3.connect(DB_PATH)
