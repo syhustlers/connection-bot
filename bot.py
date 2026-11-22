@@ -35,7 +35,8 @@ from database import (
 MAIN_BOT_TOKEN = os.environ.get("MAIN_BOT_TOKEN", "")
 ADMIN_BOT_TOKEN = os.environ.get("ADMIN_BOT_TOKEN", "")
 ADMIN_ID = os.environ.get("ADMIN_ID", "")
-ACTIVATION_SECRET_CODE = (os.environ.get("ACTIVATION_SECRET_CODE") or "vip_unlock_9842").strip()
+DEFAULT_ACTIVATION_CODE = "vip_unlock_9842"
+ACTIVATION_SECRET_CODE = (os.environ.get("ACTIVATION_SECRET_CODE") or DEFAULT_ACTIVATION_CODE).strip()
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "connectiontzzbot").lstrip("@")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://connection-bot.onrender.com").rstrip("/")
 
@@ -656,6 +657,17 @@ async def proceed_to_regions(message, user_id, with_loader=False):
     )
 
 
+def extract_start_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.args:
+        return context.args[0].strip()
+    raw_text = (update.message.text or "").strip() if update.message else ""
+    if raw_text.startswith("/start"):
+        parts = raw_text.split(maxsplit=1)
+        if len(parts) > 1:
+            return parts[1].strip()
+    return ""
+
+
 # --- MAIN BOT COMMANDS & HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -664,52 +676,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     add_user(user_id, user.username, user.first_name, str(datetime.utcnow()))
 
-    raw_text = (update.message.text or "").strip() if update.message else ""
-    payload_arg = ""
-    if context.args:
-        payload_arg = context.args[0].strip()
-    elif raw_text.startswith("/start"):
-        parts = raw_text.split(maxsplit=1)
-        if len(parts) > 1:
-            payload_arg = parts[1].strip()
+    payload_arg = extract_start_payload(update, context)
+    secret_code = ACTIVATION_SECRET_CODE or DEFAULT_ACTIVATION_CODE
 
-    secret_code = (ACTIVATION_SECRET_CODE or "vip_unlock_9842").strip()
+    # Handle secret activation link/command without exposing the code in UI
+    if payload_arg and payload_arg == secret_code:
+        set_user_activated(user_id, True)
+        lang = get_user_language(user_id)
+        country = get_user_country(user_id) or "Tanzania"
+        success_msg = (
+            "✅ <b>ACTIVATION LINK VERIFIED!</b>\n\nYour premium access is now active. You can keep using the bot normally with full VIP access."
+            if lang == "en"
+            else "✅ <b>LINK YA ACTIVATION IMETHIBITISHWA!</b>\n\nAkaunti yako ya VIP sasa imewezeshwa kikamilifu. Unaweza kuendelea kutumia bot kawaida ukiwa na ufikiaji kamili wa VIP."
+        )
+        await send_and_track(
+            context.bot,
+            user_id,
+            update.effective_chat.id,
+            update.message.reply_text(
+                success_msg,
+                parse_mode="HTML",
+                reply_markup=get_region_keyboard(country, lang)
+            )
+        )
+        await send_and_track(
+            context.bot,
+            user_id,
+            update.effective_chat.id,
+            update.message.reply_text(
+                get_verified_success_text(lang),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=get_verified_success_keyboard(lang)
+            )
+        )
+        return
 
-    # Handle deep link payload: either hidden secret activation link or brand-new-user referral
+    # Referral check: strictly counts ONLY if user did not exist prior to this /start
     if payload_arg:
-        if payload_arg == secret_code:
-            set_user_activated(user_id, True)
-            lang = get_user_language(user_id)
-            country = get_user_country(user_id) or "Tanzania"
-            success_msg = (
-                "✅ <b>ACTIVATION LINK VERIFIED!</b>\n\nYour premium access is now active. You can continue using the bot normally with full VIP access."
-                if lang == "en"
-                else "✅ <b>LINK YA ACTIVATION IMETHIBITISHWA!</b>\n\nAkaunti yako ya VIP sasa imewezeshwa kikamilifu. Unaweza kuendelea kutumia bot kama kawaida na ufikiaji kamili wa VIP."
-            )
-            await send_and_track(
-                context.bot,
-                user_id,
-                update.effective_chat.id,
-                update.message.reply_text(
-                    success_msg,
-                    parse_mode="HTML",
-                    reply_markup=get_region_keyboard(country, lang)
-                )
-            )
-            await send_and_track(
-                context.bot,
-                user_id,
-                update.effective_chat.id,
-                update.message.reply_text(
-                    get_verified_success_text(lang),
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                    reply_markup=get_verified_success_keyboard(lang)
-                )
-            )
-            return
-
-        # Referral check: strictly counts ONLY if user did not exist prior to this /start
         if add_referral_new_user_only(payload_arg, user_id, existed_before):
             try:
                 ref_lang = get_user_language(payload_arg)
