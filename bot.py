@@ -6,8 +6,8 @@ import asyncio
 import logging
 from datetime import datetime
 from urllib.parse import quote
-from flask import Flask, request, redirect
 from threading import Thread
+from flask import Flask, request, redirect
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -54,8 +54,9 @@ TWO_DAYS_SECONDS = 48 * 3600
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Anti-spam cooldown store
+# Runtime state stores
 user_cooldowns = {}
+active_step_prompts = {}  # {user_id: {"chat_id": int, "message_id": int}}
 
 # Admin pending input modes
 ADMIN_MODE_ORDER = "order"
@@ -74,11 +75,95 @@ async def check_antispam(user_id):
     return True
 
 
+async def safe_delete_message(bot, chat_id, message_id):
+    if not chat_id or not message_id:
+        return
+    try:
+        await bot.delete_message(chat_id=int(chat_id), message_id=int(message_id))
+    except Exception:
+        pass
+
+
+async def safe_edit_text(message, text, reply_markup=None, disable_web_page_preview=False):
+    if not message:
+        return None
+    try:
+        return await message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview
+        )
+    except Exception:
+        try:
+            await safe_delete_message(message.get_bot(), message.chat_id, message.message_id)
+            return await message.reply_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+                disable_web_page_preview=disable_web_page_preview
+            )
+        except Exception:
+            return None
+
+
+async def register_step_prompt(bot, user_id, chat_id, message_id):
+    uid = str(user_id)
+    prev = active_step_prompts.get(uid)
+    if prev:
+        if int(prev["chat_id"]) != int(chat_id) or int(prev["message_id"]) != int(message_id):
+            await safe_delete_message(bot, prev["chat_id"], prev["message_id"])
+    active_step_prompts[uid] = {"chat_id": int(chat_id), "message_id": int(message_id)}
+
+
+async def clear_step_prompt(bot, user_id, current_message=None):
+    uid = str(user_id)
+    prev = active_step_prompts.pop(uid, None)
+    if current_message:
+        await safe_delete_message(current_message.get_bot(), current_message.chat_id, current_message.message_id)
+    if prev:
+        if not current_message or int(prev["message_id"]) != int(current_message.message_id):
+            await safe_delete_message(bot, prev["chat_id"], prev["message_id"])
+
+
 async def send_and_track(bot, user_id, chat_id, send_coro):
-    sent = await send_coro
+    try:
+        sent = await send_coro
+    except Exception as exc:
+        logger.warning(f"Failed sending message to {user_id}: {exc}")
+        return None
     if sent and getattr(sent, "message_id", None):
-        track_user_message(user_id, chat_id, sent.message_id, time.time())
+        try:
+            track_user_message(user_id, chat_id, sent.message_id, time.time())
+        except Exception:
+            pass
     return sent
+
+
+async def run_paced_loader(target_message, steps, delay=0.9, delete_after=True):
+    """Displays realistic staged system progress before moving to the next screen."""
+    if not target_message or not steps:
+        return None
+    status_msg = None
+    try:
+        status_msg = await target_message.reply_text(steps[0], parse_mode="HTML")
+    except Exception:
+        return None
+
+    for idx, step_text in enumerate(steps[1:], start=1):
+        await asyncio.sleep(delay + (0.15 if idx == len(steps) - 1 else 0.0))
+        try:
+            edited = await status_msg.edit_text(step_text, parse_mode="HTML")
+            if edited:
+                status_msg = edited
+        except Exception:
+            pass
+
+    await asyncio.sleep(delay * 0.75)
+    if delete_after and status_msg:
+        await safe_delete_message(status_msg.get_bot(), status_msg.chat_id, status_msg.message_id)
+        return None
+    return status_msg
 
 
 # --- COUNTRY ADMINISTRATIVE REGIONS ---
@@ -459,7 +544,7 @@ def get_error_403_keyboard(lang):
     ])
 
 
-def get_country_keyboard(lang):
+def get_country_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🇹🇿 Tanzania", callback_data="set_country_Tanzania")],
         [InlineKeyboardButton("🇰🇪 Kenya", callback_data="set_country_Kenya")],
@@ -488,7 +573,7 @@ async def check_membership(bot, user_id):
 
 
 # --- ONBOARDING & PREFERENCE PROMPTS ---
-async def send_country_prompt(target_message, lang):
+async def send_country_prompt(target_message, user_id, lang, replace_current=False):
     if lang == "en":
         text = (
             "🌍 <b>SELECT YOUR COUNTRY</b>\n\n"
@@ -499,10 +584,15 @@ async def send_country_prompt(target_message, lang):
             "🌍 <b>CHAGUA NCHI YAKO</b>\n\n"
             "Chagua nchi yako hapa chini ili tukuletee mikoa na maeneo sahihi ya nchi unayotaka:"
         )
-    await target_message.reply_text(text, parse_mode="HTML", reply_markup=get_country_keyboard(lang))
+
+    await clear_step_prompt(target_message.get_bot(), user_id, current_message=target_message if replace_current else None)
+    sent = await target_message.reply_text(text, parse_mode="HTML", reply_markup=get_country_keyboard())
+    if sent:
+        await register_step_prompt(target_message.get_bot(), user_id, sent.chat_id, sent.message_id)
+    return sent
 
 
-async def send_language_prompt(target_message, lang):
+async def send_language_prompt(target_message, user_id, lang, replace_current=False):
     if lang == "en":
         text = (
             "🌐 <b>CHOOSE LANGUAGE / CHAGUA LUGHA</b>\n\n"
@@ -513,12 +603,34 @@ async def send_language_prompt(target_message, lang):
             "🌐 <b>CHAGUA LUGHA / CHOOSE LANGUAGE</b>\n\n"
             "Chagua lugha unayopendelea kutumia kwenye bot:"
         )
-    await target_message.reply_text(text, parse_mode="HTML", reply_markup=get_language_keyboard())
+
+    await clear_step_prompt(target_message.get_bot(), user_id, current_message=target_message if replace_current else None)
+    sent = await target_message.reply_text(text, parse_mode="HTML", reply_markup=get_language_keyboard())
+    if sent:
+        await register_step_prompt(target_message.get_bot(), user_id, sent.chat_id, sent.message_id)
+    return sent
 
 
-async def proceed_to_regions(message, user_id):
+async def proceed_to_regions(message, user_id, with_loader=False):
     lang = get_user_language(user_id)
     country = get_user_country(user_id) or "Tanzania"
+
+    if with_loader:
+        loader_steps = (
+            [
+                "<i>🔄 Applying your preferences...</i>",
+                f"<i>🌍 Loading {country} regions...</i>",
+                "<i>⚡ Preparing region menu...</i>"
+            ]
+            if lang == "en"
+            else [
+                "<i>🔄 Inahifadhi chaguo lako...</i>",
+                f"<i>🌍 Inapakia mikoa ya {country}...</i>",
+                "<i>⚡ Inaandaa orodha ya mikoa...</i>"
+            ]
+        )
+        await run_paced_loader(message, loader_steps, delay=0.8, delete_after=True)
+
     if lang == "en":
         welcome_text = (
             f"🍑 Welcome to <b>Tanzania Connection Bot</b> 🔞\n\n"
@@ -535,6 +647,7 @@ async def proceed_to_regions(message, user_id):
             "🆓 Huduma ni <b>BURE 100%</b> masaa 24/7!\n\n"
             "👇 <b>Chagua mkoa/eneo unalotaka kutoka kwenye orodha hapa chini</b> 👇"
         )
+
     await send_and_track(
         message.get_bot(),
         user_id,
@@ -608,7 +721,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     yes_label = "✅ YES, I AM 18+" if lang == "en" else "✅ NDIO, NINA 18+"
     no_label = "❌ NO" if lang == "en" else "❌ HAPANA"
 
-    await send_and_track(
+    await clear_step_prompt(context.bot, user_id)
+    sent = await send_and_track(
         context.bot,
         user_id,
         update.effective_chat.id,
@@ -621,18 +735,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
     )
+    if sent:
+        await register_step_prompt(context.bot, user_id, sent.chat_id, sent.message_id)
 
 
 async def cmd_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     lang = get_user_language(user_id)
-    await send_country_prompt(update.message, lang)
+    await send_country_prompt(update.message, user_id, lang, replace_current=False)
 
 
 async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     lang = get_user_language(user_id)
-    await send_language_prompt(update.message, lang)
+    await send_language_prompt(update.message, user_id, lang, replace_current=False)
 
 
 async def age_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -642,12 +758,13 @@ async def age_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "age_no":
+        active_step_prompts.pop(user_id, None)
         deny_text = (
             "❌ Sorry, you cannot use this bot if you are under 18."
             if lang == "en"
             else "❌ Samahani, huwezi kutumia bot hii ikiwa una chini ya miaka 18."
         )
-        await query.message.edit_text(deny_text)
+        await safe_edit_text(query.message, deny_text)
         return
 
     is_joined = await check_membership(context.bot, query.from_user.id)
@@ -666,9 +783,9 @@ async def age_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         btn_join = "📢 JOIN CHANNEL" if lang == "en" else "📢 JIUNGE NA CHANNEL"
         btn_check = "✅ I HAVE JOINED, CONTINUE" if lang == "en" else "✅ NIMESHAJIUNGE, ENDELEA"
 
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             join_text,
-            parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(btn_join, url="https://t.me/connectiontzz")],
@@ -677,7 +794,17 @@ async def age_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await send_country_prompt(query.message, lang)
+    await clear_step_prompt(context.bot, user_id, current_message=query.message)
+    await run_paced_loader(
+        query.message,
+        [
+            "<i>🔐 Verifying age & session...</i>" if lang == "en" else "<i>🔐 Inathibitisha umri na mfumo...</i>",
+            "<i>🌍 Loading available countries...</i>" if lang == "en" else "<i>🌍 Inapakia nchi zinazopatikana...</i>"
+        ],
+        delay=0.75,
+        delete_after=True
+    )
+    await send_country_prompt(query.message, user_id, lang, replace_current=False)
 
 
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -692,7 +819,16 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     text = (update.message.text or "").strip()
 
     if text in SWITCH_KB_LABELS:
-        await send_country_prompt(update.message, lang)
+        await run_paced_loader(
+            update.message,
+            [
+                "<i>🔄 Opening country & language settings...</i>" if lang == "en" else "<i>🔄 Inafungua mipangilio ya nchi na lugha...</i>",
+                "<i>🌍 Loading country options...</i>" if lang == "en" else "<i>🌍 Inapakia chaguo la nchi...</i>"
+            ],
+            delay=0.7,
+            delete_after=True
+        )
+        await send_country_prompt(update.message, user_id, lang, replace_current=False)
         return
 
     if text in ALL_REGIONS:
@@ -700,16 +836,31 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if not saved_country:
             set_user_country(user_id, effective_country)
 
-        hide_kb = await update.message.reply_text(
-            "<i>🔄 Loading area details...</i>" if lang == "en" else "<i>🔄 Inapakia taarifa za eneo lako...</i>",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        await asyncio.sleep(0.5)
+        hide_kb = None
         try:
-            await hide_kb.delete()
+            hide_kb = await update.message.reply_text(
+                "<i>🔄 Loading area details...</i>" if lang == "en" else "<i>🔄 Inapakia taarifa za eneo lako...</i>",
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardRemove()
+            )
         except Exception:
             pass
+
+        await asyncio.sleep(0.75)
+        try:
+            if hide_kb:
+                await hide_kb.edit_text(
+                    f"<i>📍 Searching active connections in {text}...</i>"
+                    if lang == "en"
+                    else f"<i>📍 Inatafuta waliopo active {text}...</i>",
+                    parse_mode="HTML"
+                )
+        except Exception:
+            pass
+
+        await asyncio.sleep(0.75)
+        if hide_kb:
+            await safe_delete_message(context.bot, hide_kb.chat_id, hide_kb.message_id)
 
         seen = get_seen_images(user_id)
         available_images = [img for img in IMAGES if img not in seen]
@@ -814,15 +965,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 show_alert=True
             )
             return
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        await send_country_prompt(query.message, lang)
+        await clear_step_prompt(context.bot, user_id, current_message=query.message)
+        await run_paced_loader(
+            query.message,
+            [
+                "<i>✅ Channel membership confirmed...</i>" if lang == "en" else "<i>✅ Uanachama wa channel umethibitishwa...</i>",
+                "<i>🌍 Loading country selection...</i>" if lang == "en" else "<i>🌍 Inapakia chaguo la nchi...</i>"
+            ],
+            delay=0.75,
+            delete_after=True
+        )
+        await send_country_prompt(query.message, user_id, lang, replace_current=False)
         return
 
     if data == "pick_country":
-        await send_country_prompt(query.message, lang)
+        await run_paced_loader(
+            query.message,
+            [
+                "<i>🌍 Loading countries...</i>" if lang == "en" else "<i>🌍 Inapakia nchi...</i>"
+            ],
+            delay=0.65,
+            delete_after=True
+        )
+        await send_country_prompt(query.message, user_id, lang, replace_current=False)
         return
 
     if data.startswith("set_country_"):
@@ -830,29 +995,49 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chosen_country not in REGIONS_BY_COUNTRY:
             chosen_country = "Tanzania"
         set_user_country(user_id, chosen_country)
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        await send_language_prompt(query.message, lang)
+        await clear_step_prompt(context.bot, user_id, current_message=query.message)
+        await run_paced_loader(
+            query.message,
+            [
+                f"<i>🌍 Selected {chosen_country}...</i>" if lang == "en" else f"<i>🌍 Umechagua {chosen_country}...</i>",
+                "<i>🌐 Loading language options...</i>" if lang == "en" else "<i>🌐 Inapakia chaguo la lugha...</i>"
+            ],
+            delay=0.75,
+            delete_after=True
+        )
+        await send_language_prompt(query.message, user_id, lang, replace_current=False)
         return
 
     if data == "pick_language":
-        await send_language_prompt(query.message, lang)
+        await run_paced_loader(
+            query.message,
+            [
+                "<i>🌐 Loading language options...</i>" if lang == "en" else "<i>🌐 Inapakia chaguo la lugha...</i>"
+            ],
+            delay=0.65,
+            delete_after=True
+        )
+        await send_language_prompt(query.message, user_id, lang, replace_current=False)
         return
 
     if data.startswith("set_lang_"):
         chosen_lang = "en" if data.endswith("_en") else "sw"
         set_user_language(user_id, chosen_lang)
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        await proceed_to_regions(query.message, user_id)
+        await clear_step_prompt(context.bot, user_id, current_message=query.message)
+        await proceed_to_regions(query.message, user_id, with_loader=True)
         return
 
     if data == "get_connection":
         if is_user_activated(user_id):
+            await run_paced_loader(
+                query.message,
+                [
+                    "<i>🔐 Checking VIP account status...</i>" if lang == "en" else "<i>🔐 Inakagua hali ya akaunti ya VIP...</i>",
+                    "<i>✅ VIP status verified! Unlocking access...</i>" if lang == "en" else "<i>✅ Akaunti ya VIP imethibitishwa! Inafungua...</i>"
+                ],
+                delay=0.8,
+                delete_after=True
+            )
             await send_and_track(
                 context.bot,
                 user_id,
@@ -869,27 +1054,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         steps = (
             [
                 "<i>🔍 Scanning security servers...</i>",
-                "<i>🔄 Looking up profile records...</i>",
-                "<i>🔐 Running verification gate...</i>",
+                "<i>🔄 Looking up profile & connection records...</i>",
+                "<i>🔐 Running verification gate check...</i>",
                 "<i>⚠️ Security firewall restricted direct number access...</i>"
             ]
             if lang == "en"
             else [
                 "<i>🔍 Kuchunguza seva za usalama...</i>",
-                "<i>🔄 Inatafuta data za mtumiaji...</i>",
+                "<i>🔄 Inatafuta data za mtumiaji na connection...</i>",
                 "<i>🔐 Inapitia mfumo wa uthibitisho...</i>",
                 "<i>⚠️ Firewall imezuia upatikanaji wa namba...</i>"
             ]
         )
-        msg = await query.message.reply_text(steps[0], parse_mode="HTML")
-        for s_text in steps[1:]:
-            await asyncio.sleep(0.55)
-            msg = await msg.edit_text(s_text, parse_mode="HTML")
-        await asyncio.sleep(0.55)
-        try:
-            await msg.delete()
-        except Exception:
-            pass
+        await run_paced_loader(query.message, steps, delay=0.95, delete_after=True)
 
         await send_and_track(
             context.bot,
@@ -923,9 +1100,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             btn_open = "🌐 FUNGUA TOVUTI YA ACTIVATION"
             btn_back = "🔙 RUDI"
 
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
-            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(btn_open, url=CPA_LINK)],
                 [InlineKeyboardButton(btn_back, callback_data="back_to_error")]
@@ -958,9 +1135,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             btn_check = "🔄 CHEKI IDADI"
             btn_back = "🔙 RUDI"
 
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
-            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(btn_check, callback_data="check_refs")],
                 [InlineKeyboardButton(btn_back, callback_data="back_to_error")]
@@ -1015,9 +1192,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             btn_back = "🔙 RUDI"
 
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
-            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🇹🇿 Tanzania — TZS 4,500", url=PAY_LINK_TZ)],
                 [InlineKeyboardButton("🇰🇪 Kenya — KSH 230", url=PAY_LINK_KE)],
@@ -1029,19 +1206,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "back_to_error":
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             get_error_403_text(lang),
-            parse_mode="HTML",
             reply_markup=get_error_403_keyboard(lang)
         )
         return
 
     if data in ("back", "back_to_regions"):
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        await proceed_to_regions(query.message, user_id)
+        await clear_step_prompt(context.bot, user_id, current_message=query.message)
+        await proceed_to_regions(query.message, user_id, with_loader=False)
 
 
 # --- BROADCAST FORMATTING & MULTI-BUTTON PARSER ---
@@ -1177,13 +1351,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
     if data == "admin_home":
         context.user_data.pop("admin_mode", None)
         text, kb = get_admin_home_text_and_kb()
-        await query.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        await safe_edit_text(query.message, text, reply_markup=kb)
         return
 
     if data == "admin_stats":
         total_users = get_total_users_count()
         c_counts = get_users_by_country_counts()
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             "📊 <b>SYSTEM & COUNTRY STATISTICS</b>\n\n"
             f"👥 Total Users: <code>{total_users}</code>\n"
             f"🇹🇿 Tanzania: <code>{c_counts['Tanzania']}</code>\n"
@@ -1191,7 +1366,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
             f"🇺🇬 Uganda: <code>{c_counts['Uganda']}</code>\n"
             f"🌐 Unset: <code>{c_counts['Unset']}</code>\n"
             "🚀 Status: <b>Online & Stable 24/7</b>",
-            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
         return
@@ -1201,7 +1375,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
         c_counts = get_users_by_country_counts()
         users = get_all_users()
         recent = ", ".join(users[-5:]) if users else "Hakuna"
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             "👥 <b>WATUMIAJI KWA NCHI</b>\n\n"
             f"📈 Jumla Kuu: <code>{total_users}</code>\n"
             f"🇹🇿 Tanzania: <code>{c_counts['Tanzania']}</code>\n"
@@ -1209,17 +1384,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
             f"🇺🇬 Uganda: <code>{c_counts['Uganda']}</code>\n"
             f"🌐 Unset: <code>{c_counts['Unset']}</code>\n"
             f"🆔 ID za mwisho 5: <code>{recent}</code>",
-            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
         return
 
     if data == "admin_check_order":
         context.user_data["admin_mode"] = ADMIN_MODE_ORDER
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             "🔍 <b>ANGALIA ORDER YA MALIPO</b>\n\n"
             "Tuma Order ID / Ref kwenye chat hii kuangalia rekodi yake kwenye database:",
-            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
         return
@@ -1228,14 +1402,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
         context.user_data["admin_mode"] = ADMIN_MODE_BROADCAST
         admin_broadcast_drafts.setdefault(admin_uid, {"items": [], "text": ""})
         msg, kb = get_broadcast_composer_text_and_kb(admin_uid)
-        await query.message.edit_text(msg, parse_mode="HTML", reply_markup=kb)
+        await safe_edit_text(query.message, msg, reply_markup=kb)
         return
 
     if data == "bcast_clear":
         context.user_data["admin_mode"] = ADMIN_MODE_BROADCAST
         admin_broadcast_drafts[admin_uid] = {"items": [], "text": ""}
         msg, kb = get_broadcast_composer_text_and_kb(admin_uid)
-        await query.message.edit_text(msg, parse_mode="HTML", reply_markup=kb)
+        await safe_edit_text(query.message, msg, reply_markup=kb)
         return
 
     if data == "bcast_preview":
@@ -1244,43 +1418,46 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
         items = draft.get("items", [])
         clean_text, markup = parse_broadcast_text_and_buttons(draft.get("text", ""))
 
-        if len(items) > 1:
-            media_group = []
-            for idx, item in enumerate(items):
-                cap = clean_text if idx == 0 and clean_text else None
+        try:
+            if len(items) > 1:
+                media_group = []
+                for idx, item in enumerate(items):
+                    cap = clean_text if idx == 0 and clean_text else None
+                    if item["type"] == "photo":
+                        media_group.append(InputMediaPhoto(media=item["bytes"], caption=cap, parse_mode="HTML" if cap else None))
+                    else:
+                        media_group.append(InputMediaVideo(media=item["bytes"], caption=cap, parse_mode="HTML" if cap else None))
+                await query.message.reply_media_group(media=media_group)
+                if markup or (not clean_text):
+                    await query.message.reply_text(
+                        "👇 <b>Buttons Preview:</b>" if markup else "ℹ️ <i>Media group previewed above.</i>",
+                        parse_mode="HTML",
+                        reply_markup=markup
+                    )
+            elif len(items) == 1:
+                item = items[0]
                 if item["type"] == "photo":
-                    media_group.append(InputMediaPhoto(media=item["bytes"], caption=cap, parse_mode="HTML" if cap else None))
+                    await query.message.reply_photo(
+                        photo=item["bytes"],
+                        caption=clean_text or None,
+                        parse_mode="HTML" if clean_text else None,
+                        reply_markup=markup
+                    )
                 else:
-                    media_group.append(InputMediaVideo(media=item["bytes"], caption=cap, parse_mode="HTML" if cap else None))
-            await query.message.reply_media_group(media=media_group)
-            if markup or (not clean_text):
+                    await query.message.reply_video(
+                        video=item["bytes"],
+                        caption=clean_text or None,
+                        parse_mode="HTML" if clean_text else None,
+                        reply_markup=markup
+                    )
+            else:
                 await query.message.reply_text(
-                    "👇 <b>Buttons Preview:</b>" if markup else "ℹ️ <i>Media group previewed above.</i>",
+                    clean_text or "<i>(Empty broadcast)</i>",
                     parse_mode="HTML",
                     reply_markup=markup
                 )
-        elif len(items) == 1:
-            item = items[0]
-            if item["type"] == "photo":
-                await query.message.reply_photo(
-                    photo=item["bytes"],
-                    caption=clean_text or None,
-                    parse_mode="HTML" if clean_text else None,
-                    reply_markup=markup
-                )
-            else:
-                await query.message.reply_video(
-                    video=item["bytes"],
-                    caption=clean_text or None,
-                    parse_mode="HTML" if clean_text else None,
-                    reply_markup=markup
-                )
-        else:
-            await query.message.reply_text(
-                clean_text or "<i>(Empty broadcast)</i>",
-                parse_mode="HTML",
-                reply_markup=markup
-            )
+        except Exception as exc:
+            await query.message.reply_text(f"⚠️ Preview issue: <code>{exc}</code>", parse_mode="HTML")
 
         msg, kb = get_broadcast_composer_text_and_kb(admin_uid)
         await query.message.reply_text(msg, parse_mode="HTML", reply_markup=kb)
@@ -1293,7 +1470,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
         clean_text, markup = parse_broadcast_text_and_buttons(draft.get("text", ""))
 
         if not items and not clean_text:
-            await query.message.edit_text(
+            await safe_edit_text(
+                query.message,
                 "❌ Hakuna media wala ujumbe uliowekwa. Rudi kwenye Broadcast Studio.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_broadcast_menu")]])
             )
@@ -1302,7 +1480,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
         users = get_all_users()
         success = 0
         failed = 0
-        status_msg = await query.message.edit_text(f"🚀 Inatuma broadcast kwa watumiaji {len(users)}...")
+        status_msg = await safe_edit_text(query.message, f"🚀 Inatuma broadcast kwa watumiaji {len(users)}...")
 
         for uid in users:
             try:
@@ -1352,21 +1530,24 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
                 failed += 1
 
         admin_broadcast_drafts[admin_uid] = {"items": [], "text": ""}
-        await status_msg.edit_text(
+        done_text = (
             "✅ <b>BROADCAST IMEKAMILIKA!</b>\n\n"
             f"📤 Imefanikiwa: <code>{success}</code>\n"
-            f"❌ Imeshindikana: <code>{failed}</code>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KWENYE MENYU", callback_data="admin_home")]])
+            f"❌ Imeshindikana: <code>{failed}</code>"
         )
+        done_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KWENYE MENYU", callback_data="admin_home")]])
+        if status_msg:
+            await safe_edit_text(status_msg, done_text, reply_markup=done_kb)
+        else:
+            await query.message.reply_text(done_text, parse_mode="HTML", reply_markup=done_kb)
         return
 
     if data == "admin_clean":
         user_cooldowns.clear()
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             "🔄 <b>USAFISHAJI WA MFUMO</b>\n\n"
             "Kache za muda mfupi zimesafishwa. Mfumo upo safi na unafanya kazi.",
-            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
 
@@ -1441,7 +1622,10 @@ def click_redirect():
     target_url = request.args.get("url", TARGET_SITE)
     if not re.match(r"^https?://", target_url, re.IGNORECASE):
         target_url = TARGET_SITE
-    log_broadcast_click("user", target_url)
+    try:
+        log_broadcast_click("user", target_url)
+    except Exception:
+        pass
     return redirect(target_url)
 
 
@@ -1455,51 +1639,51 @@ async def background_automation_loop(main_app):
     last_backup_key = None
     while True:
         await asyncio.sleep(60)
-        now_ts = time.time()
-        cutoff_ts = now_ts - TWO_DAYS_SECONDS
+        try:
+            now_ts = time.time()
+            cutoff_ts = now_ts - TWO_DAYS_SECONDS
 
-        expired_rows = get_expired_messages(cutoff_ts)
-        if expired_rows:
-            processed_ids = []
-            notified_users = set()
+            expired_rows = get_expired_messages(cutoff_ts)
+            if expired_rows:
+                processed_ids = []
+                notified_users = set()
 
-            for row_id, uid, chat_id, msg_id in expired_rows:
-                try:
-                    await main_app.bot.delete_message(chat_id=int(chat_id), message_id=int(msg_id))
-                except Exception:
-                    pass
-                processed_ids.append(row_id)
+                for row_id, uid, chat_id, msg_id in expired_rows:
+                    await safe_delete_message(main_app.bot, chat_id, msg_id)
+                    processed_ids.append(row_id)
 
-                if uid not in notified_users:
-                    notified_users.add(uid)
-                    lang = get_user_language(uid)
-                    country = get_user_country(uid) or "Tanzania"
-                    return_msg = (
-                        "⏳ <b>Old messages were cleared after 2 days.</b>\n\n"
-                        "📍 Pick your region below to continue:"
-                        if lang == "en"
-                        else "⏳ <b>Ujumbe wa siku 2 umefutwa kiotomatiki.</b>\n\n"
-                        "📍 Chagua mkoa wako hapa chini kuendelea:"
-                    )
-                    try:
-                        await main_app.bot.send_message(
-                            chat_id=int(chat_id),
-                            text=return_msg,
-                            parse_mode="HTML",
-                            reply_markup=get_region_keyboard(country, lang)
+                    if uid not in notified_users:
+                        notified_users.add(uid)
+                        lang = get_user_language(uid)
+                        country = get_user_country(uid) or "Tanzania"
+                        return_msg = (
+                            "⏳ <b>Old messages were cleared after 2 days.</b>\n\n"
+                            "📍 Pick your region below to continue:"
+                            if lang == "en"
+                            else "⏳ <b>Ujumbe wa siku 2 umefutwa kiotomatiki.</b>\n\n"
+                            "📍 Chagua mkoa wako hapa chini kuendelea:"
                         )
-                    except Exception:
-                        pass
+                        try:
+                            await main_app.bot.send_message(
+                                chat_id=int(chat_id),
+                                text=return_msg,
+                                parse_mode="HTML",
+                                reply_markup=get_region_keyboard(country, lang)
+                            )
+                        except Exception:
+                            pass
 
-            delete_tracked_messages_by_ids(processed_ids)
+                delete_tracked_messages_by_ids(processed_ids)
+        except Exception as exc:
+            logger.warning(f"Auto-delete loop error: {exc}")
 
         # Weekly Monday 03:00 UTC database backup to admin
-        now_dt = datetime.utcnow()
-        backup_key = now_dt.strftime("%Y-%W")
-        if now_dt.weekday() == 0 and now_dt.hour == 3 and last_backup_key != backup_key:
-            last_backup_key = backup_key
-            if os.path.exists(DB_PATH) and ADMIN_ID:
-                try:
+        try:
+            now_dt = datetime.utcnow()
+            backup_key = now_dt.strftime("%Y-%W")
+            if now_dt.weekday() == 0 and now_dt.hour == 3 and last_backup_key != backup_key:
+                last_backup_key = backup_key
+                if os.path.exists(DB_PATH) and ADMIN_ID:
                     with open(DB_PATH, "rb") as db_file:
                         await main_app.bot.send_document(
                             chat_id=int(ADMIN_ID),
@@ -1507,8 +1691,8 @@ async def background_automation_loop(main_app):
                             caption=f"📦 <b>AUTOMATED WEEKLY DATABASE BACKUP</b>\n📅 {now_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC",
                             parse_mode="HTML"
                         )
-                except Exception:
-                    pass
+        except Exception:
+            pass
 
 
 # --- UNIFIED ASYNC MAIN RUNNER ---
