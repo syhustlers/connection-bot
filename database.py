@@ -15,11 +15,20 @@ def _resolve_db_path():
 DB_PATH = _resolve_db_path()
 
 
+class _AutoCloseConnection(sqlite3.Connection):
+    """`with get_conn() as conn:` commits/rolls back AND closes the connection."""
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
+
 def get_conn():
     parent_dir = os.path.dirname(DB_PATH)
     if parent_dir:
         os.makedirs(parent_dir, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False, factory=_AutoCloseConnection)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA busy_timeout=30000;")
@@ -48,6 +57,10 @@ def init_db():
             c.execute("ALTER TABLE users ADD COLUMN language TEXT DEFAULT 'sw'")
         if "country" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN country TEXT")
+        if "joined_at" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN joined_at TEXT")
+            if "joined_date" in cols:
+                c.execute("UPDATE users SET joined_at = joined_date WHERE joined_at IS NULL")
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS referrals (
@@ -80,6 +93,13 @@ def init_db():
                 sent_at REAL
             )
         """)
+        c.execute("PRAGMA table_info(tracked_messages)")
+        tm_cols = {row[1] for row in c.fetchall()}
+        if "sent_at" not in tm_cols:
+            c.execute("ALTER TABLE tracked_messages ADD COLUMN sent_at REAL")
+            if "created_ts" in tm_cols:
+                c.execute("UPDATE tracked_messages SET sent_at = created_ts WHERE sent_at IS NULL")
+
         c.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 order_id TEXT PRIMARY KEY,
@@ -177,7 +197,15 @@ def is_user_activated(user_id):
     uid = str(user_id)
     with get_conn() as conn:
         row = conn.execute("SELECT activated FROM users WHERE user_id = ?", (uid,)).fetchone()
-        return bool(row and int(row[0] or 0) == 1)
+        if row and int(row[0] or 0) == 1:
+            return True
+        refs = conn.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (uid,)).fetchone()
+        if refs and int(refs[0] or 0) >= 10:
+            return True
+        done = conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE user_id = ? AND status = 'completed'", (uid,)
+        ).fetchone()
+        return bool(done and int(done[0] or 0) > 0)
 
 
 def add_referral_new_user_only(referrer_id, referred_id, existed_before):
