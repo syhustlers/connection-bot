@@ -1,14 +1,18 @@
 import os
+import re
+import time
 import random
 import asyncio
 import logging
-import requests
 from datetime import datetime
+from urllib.parse import quote
 from flask import Flask, request, redirect
 from threading import Thread
 
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton,
+    InputMediaPhoto, InputMediaVideo
 )
 from telegram.ext import (
     ApplicationBuilder, ContextTypes, CommandHandler,
@@ -16,100 +20,125 @@ from telegram.ext import (
 )
 
 from database import (
-    init_db, add_user, add_referral, get_referral_count, get_all_users,
-    get_total_users_count, get_seen_images, add_seen_image, reset_seen_images,
+    init_db, user_exists, add_user, set_user_country, get_user_country,
+    set_user_language, get_user_language, set_user_activated,
+    add_referral_new_user_only, get_referral_count, get_all_users,
+    get_total_users_count, get_users_by_country_counts,
+    get_seen_images, add_seen_image, reset_seen_images,
     get_order_details, is_user_activated,
-    log_broadcast_click, get_click_count_for_url, DB_PATH
+    log_broadcast_click, get_click_count_for_url,
+    track_user_message, get_expired_messages, delete_tracked_messages_by_ids,
+    DB_PATH
 )
 
 # --- ENVIRONMENT CONFIGS ---
 MAIN_BOT_TOKEN = os.environ.get("MAIN_BOT_TOKEN", "")
 ADMIN_BOT_TOKEN = os.environ.get("ADMIN_BOT_TOKEN", "")
 ADMIN_ID = os.environ.get("ADMIN_ID", "")
-STANY_API_KEY = os.environ.get("STANY_API_KEY", "")
-STANY_BASE_URL = os.environ.get("STANY_BASE_URL", "https://host.stanymaxhub.online")
+ACTIVATION_SECRET_CODE = os.environ.get("ACTIVATION_SECRET_CODE", "").strip()
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "connectiontzzbot").lstrip("@")
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://connection-bot.onrender.com").rstrip("/")
 
+# --- LINKS & CHANNELS ---
 CPA_LINK = "https://tinyurl.com/Activebot"
-STANY_PAY_LINK = "https://nexus.stanyxpro.com/pay/connection-bot-subscription-mwpyeqqj"
+PAY_LINK_TZ = "https://nexus.stanyxpro.com/pay/connection-bot-subscription-mwpyeqqj"
+PAY_LINK_KE = "https://nexus.stanyxpro.com/pay/connection-bot-subscription-mwrg696v"
+PAY_LINK_UG = "https://nexus.stanyxpro.com/pay/connection-bot-subscription-mwrgfhtt"
+PAY_LINK_INTL = "https://nexus.stanyxpro.com/pay/connection-bot-subscription-mwrgc952"
+
 TARGET_SITE = "https://www.tanzaniaraha.com/"
 REQUIRED_CHANNEL = "@connectiontzz"
 
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+TWO_DAYS_SECONDS = 48 * 3600
 
-ADMIN_WAITING_ORDER = 2
-ADMIN_WAITING_BROADCAST = 3
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Anti-spam cooldown store
 user_cooldowns = {}
 
+# Admin pending input modes
+ADMIN_MODE_ORDER = "order"
+ADMIN_MODE_BROADCAST = "broadcast"
+
+# Pending multi-media broadcast drafts per admin user: {admin_id: {"items": [...], "text": ""}}
+admin_broadcast_drafts = {}
+
 
 async def check_antispam(user_id):
-    now = datetime.utcnow()
-    last_time = user_cooldowns.get(user_id)
-    if last_time and (now - last_time).total_seconds() < 0.8:
+    now = time.time()
+    last_time = user_cooldowns.get(str(user_id))
+    if last_time and (now - last_time) < 0.7:
         return False
-    user_cooldowns[user_id] = now
+    user_cooldowns[str(user_id)] = now
     return True
 
 
-def stany_request(method, path, payload=None):
-    url = f"{STANY_BASE_URL.rstrip('/')}{path}"
-    headers = {
-        "x-api-key": STANY_API_KEY,
-        "Content-Type": "application/json"
-    }
-    return requests.request(
-        method=method,
-        url=url,
-        headers=headers,
-        json=payload if payload is not None else None,
-        timeout=15
-    )
+async def send_and_track(bot, user_id, chat_id, send_coro):
+    sent = await send_coro
+    if sent and getattr(sent, "message_id", None):
+        track_user_message(user_id, chat_id, sent.message_id, time.time())
+    return sent
 
 
-def extract_payment_status(data):
-    if not isinstance(data, dict):
-        return "PENDING"
-    candidates = [
-        data.get("status"),
-        data.get("payment_status"),
-        data.get("state"),
+# --- COUNTRY ADMINISTRATIVE REGIONS ---
+REGIONS_BY_COUNTRY = {
+    "Tanzania": [
+        "Dar es Salaam", "Arusha", "Mwanza", "Dodoma", "Geita", "Iringa", "Kagera", "Katavi", "Kigoma",
+        "Kilimanjaro", "Lindi", "Manyara", "Mara", "Mbeya", "Morogoro", "Mtwara", "Njombe", "Pwani",
+        "Rukwa", "Ruvuma", "Shinyanga", "Simiyu", "Singida", "Tabora", "Tanga", "Zanzibar"
+    ],
+    "Kenya": [
+        "Baringo", "Bomet", "Bungoma", "Busia", "Elgeyo-Marakwet", "Embu", "Garissa", "Homa Bay",
+        "Isiolo", "Kajiado", "Kakamega", "Kericho", "Kiambu", "Kilifi", "Kirinyaga", "Kisii",
+        "Kisumu", "Kitui", "Kwale", "Laikipia", "Lamu", "Machakos", "Makueni", "Mandera",
+        "Marsabit", "Meru", "Migori", "Mombasa", "Murang'a", "Nairobi", "Nakuru", "Nandi",
+        "Narok", "Nyamira", "Nyandarua", "Nyeri", "Samburu", "Siaya", "Taita-Taveta", "Tana River",
+        "Tharaka-Nithi", "Trans-Nzoia", "Turkana", "Uasin Gishu", "Vihiga", "Wajir", "West Pokot"
+    ],
+    "Uganda": [
+        "Kampala", "Wakiso", "Mukono", "Jinja", "Gulu", "Mbarara", "Mbale", "Arua", "Lira", "Masaka",
+        "Entebbe", "Hoima", "Fort Portal", "Kasese", "Kabale", "Soroti", "Moroto", "Tororo",
+        "Iganga", "Luweero", "Mityana", "Masindi", "Bushenyi", "Rukungiri", "Ntungamo", "Kapchorwa",
+        "Kitgum", "Nebbi", "Pallisa", "Kamuli", "Apac", "Adjumani", "Koboko", "Yumbe", "Mubende", "Kyenjojo"
     ]
-    nested = data.get("data") or data.get("payment") or data.get("transaction")
-    if isinstance(nested, dict):
-        candidates.extend([
-            nested.get("status"),
-            nested.get("payment_status"),
-            nested.get("state"),
-        ])
-    for val in candidates:
-        if val:
-            return str(val).upper()
-    return "PENDING"
+}
+
+ALL_REGIONS = {
+    reg for region_list in REGIONS_BY_COUNTRY.values() for reg in region_list
+}
 
 
-# --- CUSTOM REGION LAYOUT ---
-REGIONS = [
-    "Dar es Salaam", "Arusha", "Mwanza", "Dodoma", "Geita", "Iringa", "Kagera", "Katavi", "Kigoma",
-    "Kilimanjaro", "Lindi", "Manyara", "Mara", "Mbeya", "Morogoro", "Mtwara", "Njombe", "Pwani",
-    "Rukwa", "Ruvuma", "Shinyanga", "Simiyu", "Singida", "Tabora", "Tanga", "Zanzibar"
-]
-
-
-def get_region_keyboard():
+def get_region_keyboard(country=None):
+    selected_country = country if country in REGIONS_BY_COUNTRY else "Tanzania"
+    regions = REGIONS_BY_COUNTRY[selected_country]
     keyboard = []
     idx = 0
     row_pattern = [1, 2, 1, 3, 1, 2, 1, 3, 1, 2, 1, 3, 1, 2, 1, 1]
     for count in row_pattern:
-        if idx >= len(REGIONS):
+        if idx >= len(regions):
             break
-        row = [KeyboardButton(REGIONS[idx + j]) for j in range(min(count, len(REGIONS) - idx))]
+        row = [KeyboardButton(regions[idx + j]) for j in range(min(count, len(regions) - idx))]
         keyboard.append(row)
         idx += count
-    while idx < len(REGIONS):
-        keyboard.append([KeyboardButton(REGIONS[idx])])
-        idx += 1
+    while idx < len(regions):
+        row = [KeyboardButton(regions[idx])]
+        if idx + 1 < len(regions):
+            row.append(KeyboardButton(regions[idx + 1]))
+            idx += 2
+        else:
+            idx += 1
+        keyboard.append(row)
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+def detect_country_for_region(region_text, user_country=None):
+    if user_country in REGIONS_BY_COUNTRY and region_text in REGIONS_BY_COUNTRY[user_country]:
+        return user_country
+    for c_name, r_list in REGIONS_BY_COUNTRY.items():
+        if region_text in r_list:
+            return c_name
+    return user_country or "Tanzania"
 
 
 NAMES = [
@@ -303,7 +332,46 @@ IMAGES = [
 ]
 
 
-def get_verified_success_text():
+# --- BILINGUAL TEXT & UI HELPERS ---
+def get_rotating_profile_title(region_upper, lang):
+    if lang == "en":
+        options = [
+            f"🔥 FRESH IN {region_upper} — ONLINE NOW",
+            f"⚡ ACTIVE {region_upper} — AVAILABLE RIGHT NOW",
+            f"💎 VERIFIED {region_upper} — INSTANT CONNECTION",
+            f"✨ NEW TODAY {region_upper} — READY TO CONNECT"
+        ]
+    else:
+        options = [
+            f"🔥 PISI MPYA {region_upper} — ONLINE SASA",
+            f"⚡ ACTIVE {region_upper} — ANAPATIKANA SASA HIVI",
+            f"💎 VERIFIED {region_upper} — CONNECTION YA HARAKA",
+            f"✨ MPYA LEO {region_upper} — TAYARI KUUNGANISHWA"
+        ]
+    return random.choice(options)
+
+
+def get_verified_success_text(lang):
+    if lang == "en":
+        return (
+            "🎉 <b>YOUR ACCOUNT IS NOW ACTIVATED!</b> ✅\n\n"
+            "Congrats! Your verification is confirmed and you now have full access to VIP connections and exclusive hubs. 💃🔥\n\n"
+            "🔗 <b>MAIN CONNECTION PORTAL:</b>\n"
+            "👉 <a href=\"https://www.tanzaniaraha.com/\">Open Tanzania Raha</a>\n\n"
+            "📢 <b>OFFICIAL VIP CHANNELS & GROUPS:</b>\n"
+            "🔗 <a href=\"https://t.me/rawexotichub\">Raw Exotic Hub</a>\n"
+            "🔗 <a href=\"https://t.me/hadithizamapenzi\">Hadithi za Mapenzi</a>\n"
+            "🔗 <a href=\"https://t.me/hunterjay12345\">Hunter Jay Channel</a>\n"
+            "🔗 <a href=\"https://t.me/+4Zp-ZGleL1tlZmU0\">VIP Group 1</a>\n"
+            "🔗 <a href=\"https://t.me/+t5wPETWeNGk1NDlk\">VIP Group 2</a>\n"
+            "🔗 <a href=\"https://t.me/+nLWCZ_D1zN8zNzg8\">VIP Group 3</a>\n"
+            "🔗 <a href=\"https://t.me/+Mn-pvG_YXqQzNTQ0\">VIP Group 4</a>\n"
+            "🔗 <a href=\"https://t.me/+xzbacOOTVwkxNjZk\">VIP Group 5</a>\n"
+            "🔗 <a href=\"https://t.me/+QeTJSEa1s2xmZTJk\">VIP Group 6</a>\n"
+            "🔗 <a href=\"https://t.me/joinchat/AAAAAEzFd9XDWqbcyqXiOg\">Archive & Vault</a>\n\n"
+            "👇 <i>Choose an option below or return to your regions:</i>"
+        )
+
     return (
         "🎉 <b>AKAUNTI YAKO IMEWEZESHWA KIKAMILIFU!</b> ✅\n\n"
         "Hongera! Uthibitisho wako umekubaliwa kwenye mfumo na sasa una ufikiaji kamili wa huduma zote za VIP na machapisho ya kipekee. 💃🔥\n\n"
@@ -324,7 +392,72 @@ def get_verified_success_text():
     )
 
 
+def get_error_403_text(lang):
+    if lang == "en":
+        return (
+            "🛑 <b>SYSTEM SECURITY ERROR [ERR_AUTH_403]</b> 🛑\n\n"
+            "Direct connection is temporarily locked. To protect profile privacy, complete one of the verification options below 👇"
+        )
+    return (
+        "🛑 <b>SYSTEM SECURITY ERROR [ERR_AUTH_403]</b> 🛑\n\n"
+        "Uunganishwaji umesitishwa kwa muda. Ili kulinda faragha ya mhusika, unahitaji kukamilisha uthibitisho wa mfumo kupitia mojawapo ya njia hapa chini 👇"
+    )
+
+
+def get_error_403_keyboard(lang):
+    if lang == "en":
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ ACTIVATION 1", callback_data="activation1"),
+                InlineKeyboardButton("✅ ACTIVATION 2", callback_data="activation2")
+            ],
+            [InlineKeyboardButton("✅ ACTIVATION 3", callback_data="activation3")],
+            [
+                InlineKeyboardButton("🌍 COUNTRY", callback_data="pick_country"),
+                InlineKeyboardButton("🌐 LANGUAGE", callback_data="pick_language")
+            ],
+            [InlineKeyboardButton("🔙 BACK", callback_data="back")]
+        ])
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ ACTIVATION 1", callback_data="activation1"),
+            InlineKeyboardButton("✅ ACTIVATION 2", callback_data="activation2")
+        ],
+        [InlineKeyboardButton("✅ ACTIVATION 3", callback_data="activation3")],
+        [
+            InlineKeyboardButton("🌍 NCHI", callback_data="pick_country"),
+            InlineKeyboardButton("🌐 LUGHA", callback_data="pick_language")
+        ],
+        [InlineKeyboardButton("🔙 RUDI", callback_data="back")]
+    ])
+
+
+def get_country_keyboard(lang):
+    if lang == "en":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🇹🇿 Tanzania", callback_data="set_country_Tanzania")],
+            [InlineKeyboardButton("🇰🇪 Kenya", callback_data="set_country_Kenya")],
+            [InlineKeyboardButton("🇺🇬 Uganda", callback_data="set_country_Uganda")]
+        ])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🇹🇿 Tanzania", callback_data="set_country_Tanzania")],
+        [InlineKeyboardButton("🇰🇪 Kenya", callback_data="set_country_Kenya")],
+        [InlineKeyboardButton("🇺🇬 Uganda", callback_data="set_country_Uganda")]
+    ])
+
+
+def get_language_keyboard():
+    # Same row, two columns: Swahili | English
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🇹🇿 Swahili", callback_data="set_lang_sw"),
+        InlineKeyboardButton("🇬🇧 English", callback_data="set_lang_en")
+    ]])
+
+
 async def check_membership(bot, user_id):
+    if not REQUIRED_CHANNEL:
+        return True
     try:
         member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=int(user_id))
         if member.status in ["member", "administrator", "creator"]:
@@ -334,139 +467,303 @@ async def check_membership(bot, user_id):
     return False
 
 
-# --- MAIN BOT HANDLERS ---
+# --- ONBOARDING & PREFERENCE PROMPTS ---
+async def send_country_prompt(target_message, lang):
+    if lang == "en":
+        text = (
+            "🌍 <b>SELECT YOUR COUNTRY</b>\n\n"
+            "Choose your country below so we load the right regions and local options for you:"
+        )
+    else:
+        text = (
+            "🌍 <b>CHAGUA NCHI YAKO</b>\n\n"
+            "Chagua nchi yako hapa chini ili tukuletee mikoa na maeneo sahihi ya nchi unayotaka:"
+        )
+    await target_message.reply_text(text, parse_mode="HTML", reply_markup=get_country_keyboard(lang))
+
+
+async def send_language_prompt(target_message, lang):
+    if lang == "en":
+        text = (
+            "🌐 <b>CHOOSE LANGUAGE / CHAGUA LUGHA</b>\n\n"
+            "Select your preferred language below:"
+        )
+    else:
+        text = (
+            "🌐 <b>CHAGUA LUGHA / CHOOSE LANGUAGE</b>\n\n"
+            "Chagua lugha unayopendelea kutumia kwenye bot:"
+        )
+    await target_message.reply_text(text, parse_mode="HTML", reply_markup=get_language_keyboard())
+
+
+async def proceed_to_regions(message, user_id):
+    lang = get_user_language(user_id)
+    country = get_user_country(user_id) or "Tanzania"
+    if lang == "en":
+        welcome_text = (
+            f"🍑 Welcome to <b>Tanzania Connection Bot</b> 🔞\n\n"
+            f"🌍 Country: <b>{country}</b>\n"
+            "📍 Pick your region/area below to browse active connections right now! 💃🔥\n"
+            "🆓 Free 24/7 browsing!\n\n"
+            "👇 <b>Choose a region from the menu below</b> 👇"
+        )
+    else:
+        welcome_text = (
+            f"🍑 Karibu kwenye <b>Tanzania Connection Bot</b> 🔞\n\n"
+            f"🌍 Nchi: <b>{country}</b>\n"
+            "📍 Chagua mkoa/eneo lako hapa chini uanze kutafuta connection sasa hivi! 💃🔥\n"
+            "🆓 Huduma ni <b>BURE 100%</b> masaa 24/7!\n\n"
+            "👇 <b>Chagua mkoa/eneo unalotaka kutoka kwenye orodha hapa chini</b> 👇"
+        )
+    await send_and_track(
+        message.get_bot(),
+        user_id,
+        message.chat_id,
+        message.reply_text(welcome_text, parse_mode="HTML", reply_markup=get_region_keyboard(country))
+    )
+
+
+# --- MAIN BOT COMMANDS & HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = str(user.id)
+    existed_before = user_exists(user_id)
+
     add_user(user_id, user.username, user.first_name, str(datetime.utcnow()))
 
+    # Handle deep link payload: either fixed secret activation link or brand-new-user referral
     if context.args:
-        ref_id = context.args[0]
-        if add_referral(ref_id, user_id):
-            try:
-                await context.bot.send_message(
-                    chat_id=int(ref_id),
-                    text="🎉 <b>Taarifa ya Mwaliko!</b>\n\n🔗 Mtu mpya amejiunga kupitia link yako ya mwaliko! Endelea kusambaza upate upendeleo zaidi.",
-                    parse_mode="HTML"
+        payload_arg = context.args[0].strip()
+
+        if ACTIVATION_SECRET_CODE and payload_arg == ACTIVATION_SECRET_CODE:
+            set_user_activated(user_id, True)
+            lang = get_user_language(user_id)
+            country = get_user_country(user_id) or "Tanzania"
+            success_msg = (
+                "✅ <b>ACTIVATION LINK VERIFIED!</b>\n\nYour premium access is now active."
+                if lang == "en"
+                else "✅ <b>LINK YA ACTIVATION IMETHIBITISHWA!</b>\n\nAkaunti yako ya VIP sasa imewezeshwa kikamilifu."
+            )
+            await send_and_track(
+                context.bot,
+                user_id,
+                update.effective_chat.id,
+                update.message.reply_text(success_msg, parse_mode="HTML")
+            )
+            await send_and_track(
+                context.bot,
+                user_id,
+                update.effective_chat.id,
+                update.message.reply_text(
+                    get_verified_success_text(lang),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🟢 OPEN CONNECTION SITE" if lang == "en" else "🟢 FUNGUA TOVUTI YA CONNECTION", url=TARGET_SITE)],
+                        [InlineKeyboardButton("🔙 BACK TO REGIONS" if lang == "en" else "🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
+                    ])
                 )
+            )
+            return
+
+        # Referral check: strictly counts ONLY if user did not exist prior to this /start
+        if add_referral_new_user_only(payload_arg, user_id, existed_before):
+            try:
+                ref_lang = get_user_language(payload_arg)
+                notify_text = (
+                    "🎉 <b>New Referral Counted!</b>\n\n🔗 A brand-new user joined through your referral link!"
+                    if ref_lang == "en"
+                    else "🎉 <b>Taarifa ya Mwaliko Mpya!</b>\n\n🔗 Mtumiaji mpya kabisa amejiunga kupitia link yako ya mwaliko!"
+                )
+                await context.bot.send_message(chat_id=int(payload_arg), text=notify_text, parse_mode="HTML")
             except Exception:
                 pass
 
-    await update.message.reply_text(
+    lang = get_user_language(user_id)
+    age_text = (
         "🔞 <b>SYSTEM AGE VERIFICATION</b>\n\n"
+        "This service is strictly for adults (18+). Please confirm your age to continue.\n\n"
+        "👇 <b>Choose below:</b>"
+        if lang == "en"
+        else "🔞 <b>SYSTEM AGE VERIFICATION</b>\n\n"
         "Huduma hii ni maalum kwa ajili ya watu wazima pekee (18+). Tafadhali thibitisha umri wako kuendelea.\n\n"
-        "👇 <b>Chagua hapa chini:</b>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ NDIO, NINA 18+", callback_data="age_yes"),
-             InlineKeyboardButton("❌ HAPANA", callback_data="age_no")]
-        ])
+        "👇 <b>Chagua hapa chini:</b>"
     )
+    yes_label = "✅ YES, I AM 18+" if lang == "en" else "✅ NDIO, NINA 18+"
+    no_label = "❌ NO" if lang == "en" else "❌ HAPANA"
+
+    await send_and_track(
+        context.bot,
+        user_id,
+        update.effective_chat.id,
+        update.message.reply_text(
+            age_text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(yes_label, callback_data="age_yes"),
+                 InlineKeyboardButton(no_label, callback_data="age_no")]
+            ])
+        )
+    )
+
+
+async def cmd_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    lang = get_user_language(user_id)
+    await send_country_prompt(update.message, lang)
+
+
+async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    lang = get_user_language(user_id)
+    await send_language_prompt(update.message, lang)
 
 
 async def age_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    user_id = str(query.from_user.id)
+    lang = get_user_language(user_id)
     await query.answer()
 
     if query.data == "age_no":
-        await query.message.edit_text("❌ Samahani, huwezi kutumia bot hii ikiwa una chini ya miaka 18.")
+        deny_text = (
+            "❌ Sorry, you cannot use this bot if you are under 18."
+            if lang == "en"
+            else "❌ Samahani, huwezi kutumia bot hii ikiwa una chini ya miaka 18."
+        )
+        await query.message.edit_text(deny_text)
         return
 
     is_joined = await check_membership(context.bot, query.from_user.id)
     if not is_joined:
+        join_text = (
+            "📢 <b>JOIN OUR OFFICIAL CHANNEL FIRST!</b>\n\n"
+            "To continue using this bot, please join our official channel below:\n\n"
+            "👉 <a href=\"https://t.me/connectiontzz\">Join Connection TZZ</a>\n\n"
+            "Once joined, tap 'Check Membership' below:"
+            if lang == "en"
+            else "📢 <b>LAZIMA UJIUNGE NA CHANNEL YETU KWANZA!</b>\n\n"
+            "Ili kuendelea kutumia bot hii, tafadhali jiunge na channel yetu rasmi hapa chini:\n\n"
+            "👉 <a href=\"https://t.me/connectiontzz\">Jiunge na Connection TZZ</a>\n\n"
+            "Baada ya kujiunga, bonyeza kitufe cha 'Kagua Uanachama' hapa chini:"
+        )
+        btn_join = "📢 JOIN CHANNEL" if lang == "en" else "📢 JIUNGE NA CHANNEL"
+        btn_check = "✅ I HAVE JOINED, CONTINUE" if lang == "en" else "✅ NIMESHAJIUNGE, ENDELEA"
+
         await query.message.edit_text(
-            f"📢 <b>LAZIMA UJIUNGE NA CHANNEL YETU KWANZA!</b>\n\n"
-            f"Ili kuendelea kutumia bot hii, tafadhali jiunge na channel yetu rasmi hapa chini:\n\n"
-            f"👉 <a href=\"https://t.me/connectiontzz\">Jiunge na Connection TZZ</a>\n\n"
-            f"Baada ya kujiunga, bonyeza kitufe cha 'Kagua Uanachama' hapa chini:",
+            join_text,
             parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📢 JIUNGE NA CHANNEL", url="https://t.me/connectiontzz")],
-                [InlineKeyboardButton("✅ NIMESHAJIUNGE, ENDELEA", callback_data="check_sub")]
+                [InlineKeyboardButton(btn_join, url="https://t.me/connectiontzz")],
+                [InlineKeyboardButton(btn_check, callback_data="check_sub")]
             ])
         )
         return
 
-    await proceed_to_regions(query.message)
-
-
-async def check_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    is_joined = await check_membership(context.bot, user_id)
-    if not is_joined:
-        await query.answer("⚠️ Bado hujajiunga na channel! Tafadhali jiunge kwanza.", show_alert=True)
-        return
-    await query.answer("✅ Uanachama umethibitishwa!", show_alert=False)
-    try:
-        await query.message.delete()
-    except Exception:
-        pass
-    await proceed_to_regions(query.message)
-
-
-async def proceed_to_regions(message):
-    welcome_text = (
-        f"🍑 Karibu kwenye <b>Tanzania Connection Bot</b> 🔞🇹🇿\n\n"
-        "📍 Chagua mkoa wako hapa chini uanze kutafuta Masugar Mummy, Pisi kali, Watoto wa chuo, na Mashangazi sasa hivi! 💃🔥\n"
-        "🆓 Huduma ni <b>BURE 100%</b> masaa 24/7!\n\n"
-        "👇 <b>Chagua mkoa unaotaka kutoka kwenye orodha hapa chini</b> 👇"
-    )
-    await message.reply_text(welcome_text, parse_mode="HTML", reply_markup=get_region_keyboard())
+    await send_country_prompt(query.message, lang)
 
 
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not await check_antispam(str(user_id)):
+    user = update.effective_user
+    user_id = str(user.id)
+    if not await check_antispam(user_id):
         return
 
-    text = update.message.text.strip()
-    if text in REGIONS:
-        hide_kb = await update.message.reply_text("<i>🔄 Inapakia taarifa za eneo lako...</i>", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
-        await asyncio.sleep(0.6)
-        await hide_kb.delete()
+    add_user(user_id, user.username, user.first_name, str(datetime.utcnow()))
+    lang = get_user_language(user_id)
+    saved_country = get_user_country(user_id)
+    text = (update.message.text or "").strip()
 
-        seen = get_seen_images(str(user_id))
+    if text in ALL_REGIONS:
+        effective_country = detect_country_for_region(text, saved_country)
+        if not saved_country:
+            set_user_country(user_id, effective_country)
+
+        hide_kb = await update.message.reply_text(
+            "<i>🔄 Loading area details...</i>" if lang == "en" else "<i>🔄 Inapakia taarifa za eneo lako...</i>",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await asyncio.sleep(0.5)
+        try:
+            await hide_kb.delete()
+        except Exception:
+            pass
+
+        seen = get_seen_images(user_id)
         available_images = [img for img in IMAGES if img not in seen]
         if not available_images:
-            reset_seen_images(str(user_id))
+            reset_seen_images(user_id)
             available_images = IMAGES
 
         image_url = random.choice(available_images)
-        add_seen_image(str(user_id), image_url)
+        add_seen_image(user_id, image_url)
 
         name = random.choice(NAMES)
         age = random.randint(18, 25)
         prefix = random.choice(["07", "06"])
-        number = f"<tg-spoiler>{prefix}{random.randint(10,99)}•••{random.randint(10,99)}</tg-spoiler>"
+        number = f"<tg-spoiler>{prefix}{random.randint(10, 99)}•••{random.randint(10, 99)}</tg-spoiler>"
+        header = get_rotating_profile_title(text.upper(), lang)
 
-        caption = (
-            f"🔥 <b>MPYA NDANI YA {text.upper()}</b> 🔥\n\n"
-            f"💋 <b>JINA:</b> {name}\n"
-            f"🎂 <b>UMRI:</b> {age} Years\n"
-            f"📍 <b>ENEO:</b> {text}\n"
-            f"📞 <b>NAMBA YA SIMU:</b> {number}\n"
-            f"💎 <b>AINA:</b> Verified Connection\n\n"
-            "👇 <b>Bonyeza kitufe hapa chini kuunganishwa nae mara moja</b> 👇"
-        )
+        if lang == "en":
+            caption = (
+                f"{header}\n\n"
+                f"💋 <b>NAME:</b> {name}\n"
+                f"🎂 <b>AGE:</b> {age} Years\n"
+                f"🌍 <b>COUNTRY:</b> {effective_country}\n"
+                f"📍 <b>AREA:</b> {text}\n"
+                f"📞 <b>PHONE NUMBER:</b> {number}\n"
+                f"💎 <b>TYPE:</b> Verified Connection\n\n"
+                "👇 <b>Tap the button below to connect immediately</b> 👇"
+            )
+            btn_connect = "🔗 CONNECT NOW"
+            btn_back_reg = "🔙 BACK TO REGIONS"
+        else:
+            caption = (
+                f"{header}\n\n"
+                f"💋 <b>JINA:</b> {name}\n"
+                f"🎂 <b>UMRI:</b> {age} Years\n"
+                f"🌍 <b>NCHI:</b> {effective_country}\n"
+                f"📍 <b>ENEO:</b> {text}\n"
+                f"📞 <b>NAMBA YA SIMU:</b> {number}\n"
+                f"💎 <b>AINA:</b> Verified Connection\n\n"
+                "👇 <b>Bonyeza kitufe hapa chini kuunganishwa nae mara moja</b> 👇"
+            )
+            btn_connect = "🔗 KUONGANISHWA NAE"
+            btn_back_reg = "🔙 RUDI KWENYE MKOA"
 
-        sent_msg = await update.message.reply_photo(
-            photo=image_url,
-            caption=caption,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 KUONGANISHWA NAE", callback_data="get_connection")],
-                [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
-            ])
+        await send_and_track(
+            context.bot,
+            user_id,
+            update.effective_chat.id,
+            update.message.reply_photo(
+                photo=image_url,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(btn_connect, callback_data="get_connection")],
+                    [InlineKeyboardButton(btn_back_reg, callback_data="back_to_regions")]
+                ])
+            )
         )
-        context.user_data.setdefault('tracked_msgs', []).append((sent_msg.message_id, datetime.utcnow()))
         return
 
-    await update.message.reply_text(
-        "📍 <b>Chagua mkoa wako kutoka kwenye orodha hapa chini:</b>",
-        parse_mode="HTML",
-        reply_markup=get_region_keyboard()
+    # Any other text returns user cleanly to their active country's region keyboard
+    fallback_text = (
+        "📍 <b>Select your region from the menu below:</b>"
+        if lang == "en"
+        else "📍 <b>Chagua mkoa wako kutoka kwenye orodha hapa chini:</b>"
+    )
+    await send_and_track(
+        context.bot,
+        user_id,
+        update.effective_chat.id,
+        update.message.reply_text(
+            fallback_text,
+            parse_mode="HTML",
+            reply_markup=get_region_keyboard(saved_country or "Tanzania")
+        )
     )
 
 
@@ -474,433 +771,657 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = str(query.from_user.id)
     if not await check_antispam(user_id):
-        await query.answer("⚠️ Unabonyeza haraka sana! Subiri kidogo.", show_alert=True)
+        await query.answer("⚠️ Too fast! Please wait a moment.", show_alert=True)
         return
 
     await query.answer()
+    lang = get_user_language(user_id)
+    data = query.data
 
-    if query.data == "check_sub":
+    if data == "check_sub":
         is_joined = await check_membership(context.bot, query.from_user.id)
         if not is_joined:
-            await query.answer("⚠️ Bado hujajiunga na channel! Tafadhali jiunge kwanza.", show_alert=True)
-            return
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        await proceed_to_regions(query.message)
-        return
-
-    if query.data == "get_connection":
-        if is_user_activated(user_id):
-            await query.message.reply_text(
-                get_verified_success_text(),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🟢 FUNGUA TOVUTI YA CONNECTION", url=TARGET_SITE)],
-                    [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
-                ])
-            )
-            return
-
-        msg = await query.message.reply_text("<i>🔍 Kuchunguza seva za usalama...</i>", parse_mode="HTML")
-        await asyncio.sleep(0.6)
-        msg = await msg.edit_text("<i>🔄 Inatafuta data za mtumiaji...</i>", parse_mode="HTML")
-        await asyncio.sleep(0.6)
-        msg = await msg.edit_text("<i>🔐 Inapitia mfumo wa uthibitisho...</i>", parse_mode="HTML")
-        await asyncio.sleep(0.6)
-        msg = await msg.edit_text("<i>⚠️ Firewall imezuia upatikanaji wa namba...</i>", parse_mode="HTML")
-        await asyncio.sleep(0.6)
-        await msg.delete()
-
-        await query.message.reply_text(
-            "🛑 <b>SYSTEM SECURITY ERROR [ERR_AUTH_403]</b> 🛑\n\n"
-            "Uunganishwaji umesitishwa kwa muda. Ili kulinda faragha ya mhusika, unahitaji kukamilisha uthibitisho wa mfumo kupitia mojawapo ya njia hapa chini 👇",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ ACTIVATION 1", callback_data="activation1"),
-                    InlineKeyboardButton("✅ ACTIVATION 2", callback_data="activation2")
-                ],
-                [InlineKeyboardButton("✅ ACTIVATION 3", callback_data="activation3")],
-                [InlineKeyboardButton("🔙 RUDI", callback_data="back")]
-            ])
-        )
-    elif query.data == "activation1":
-        await query.message.edit_text(
-            "🔐 <b>MAELEZO YA ACTIVATION [1]</b>\n\n"
-            "Tafadhali fuata maelezo na maagizo yote yaliyopo kwenye mfumo wetu ili kukamilisha hatua hii kwa usahihi. 🎯",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📥 FUNGUA TOVUTI", url=CPA_LINK)],
-                [InlineKeyboardButton("🔙 RUDI", callback_data="back_to_error")]
-            ])
-        )
-    elif query.data == "activation2":
-        ref_count = get_referral_count(user_id)
-        await query.message.edit_text(
-            f"👥 <b>JINSI YA KUFANYA VERIFICATION [2]</b>\n\n"
-            f"🔗 <b>Link yako ya Mwaliko:</b>\n<code>https://t.me/connectiontzzbot?start={user_id}</code>\n\n"
-            f"⏳ <b>Waliojiunga kupitia wewe:</b> <code>{ref_count}/10</code>\n\n"
-            "📢 Sambaza link hii kwenye magroup au kwa marafiki zako ili kujifungua bure!",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 CHEKI IDADI", callback_data="check_refs")],
-                [InlineKeyboardButton("🔙 RUDI", callback_data="back_to_error")]
-            ])
-        )
-    elif query.data == "check_refs":
-        ref_count = get_referral_count(user_id)
-        if ref_count < 10:
             await query.answer(
-                f"🚫 BADO HUJATIMIZA REFERRAL 10.\n👥 Waliojiunga: {ref_count}/10",
+                "⚠️ You haven't joined the channel yet!" if lang == "en" else "⚠️ Bado hujajiunga na channel! Tafadhali jiunge kwanza.",
                 show_alert=True
             )
-        else:
-            await query.message.reply_text(
-                get_verified_success_text(),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🟢 FUNGUA TOVUTI YA CONNECTION", url=TARGET_SITE)],
-                    [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
-                ])
-            )
-    elif query.data == "activation3":
-        await query.message.edit_text(
-            "💳 <b>ACTIVATION YA HARAKA [3]</b>\n\n"
-            "Bonyeza kitufe hapa chini kufungua ukurasa wa malipo na kukamilisha activation yako. 👇",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💳 LIPIA SASA", url=STANY_PAY_LINK)],
-                [InlineKeyboardButton("🔙 RUDI", callback_data="back_to_error")]
-            ])
-        )
-    elif query.data == "back_to_error":
-        await query.message.edit_text(
-            "🛑 <b>SYSTEM SECURITY ERROR [ERR_AUTH_403]</b> 🛑\n\nChagua njia ya activation hapa chini 👇",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ ACTIVATION 1", callback_data="activation1"),
-                    InlineKeyboardButton("✅ ACTIVATION 2", callback_data="activation2")
-                ],
-                [InlineKeyboardButton("✅ ACTIVATION 3", callback_data="activation3")],
-                [InlineKeyboardButton("🔙 RUDI", callback_data="back")]
-            ])
-        )
-    elif query.data == "back" or query.data == "back_to_regions":
+            return
         try:
             await query.message.delete()
         except Exception:
             pass
-        await query.message.reply_text("✨ <b>Chagua mkoa wako kutoka kwenye orodha hapa chini:</b>", parse_mode="HTML", reply_markup=get_region_keyboard())
+        await send_country_prompt(query.message, lang)
+        return
+
+    if data == "pick_country":
+        await send_country_prompt(query.message, lang)
+        return
+
+    if data.startswith("set_country_"):
+        chosen_country = data.replace("set_country_", "", 1)
+        if chosen_country not in REGIONS_BY_COUNTRY:
+            chosen_country = "Tanzania"
+        set_user_country(user_id, chosen_country)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await send_language_prompt(query.message, lang)
+        return
+
+    if data == "pick_language":
+        await send_language_prompt(query.message, lang)
+        return
+
+    if data.startswith("set_lang_"):
+        chosen_lang = "en" if data.endswith("_en") else "sw"
+        set_user_language(user_id, chosen_lang)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await proceed_to_regions(query.message, user_id)
+        return
+
+    if data == "get_connection":
+        if is_user_activated(user_id):
+            await send_and_track(
+                context.bot,
+                user_id,
+                query.message.chat_id,
+                query.message.reply_text(
+                    get_verified_success_text(lang),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🟢 OPEN CONNECTION SITE" if lang == "en" else "🟢 FUNGUA TOVUTI YA CONNECTION", url=TARGET_SITE)],
+                        [InlineKeyboardButton("🔙 BACK TO REGIONS" if lang == "en" else "🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
+                    ])
+                )
+            )
+            return
+
+        steps = (
+            [
+                "<i>🔍 Scanning security servers...</i>",
+                "<i>🔄 Looking up profile records...</i>",
+                "<i>🔐 Running verification gate...</i>",
+                "<i>⚠️ Security firewall restricted direct number access...</i>"
+            ]
+            if lang == "en"
+            else [
+                "<i>🔍 Kuchunguza seva za usalama...</i>",
+                "<i>🔄 Inatafuta data za mtumiaji...</i>",
+                "<i>🔐 Inapitia mfumo wa uthibitisho...</i>",
+                "<i>⚠️ Firewall imezuia upatikanaji wa namba...</i>"
+            ]
+        )
+        msg = await query.message.reply_text(steps[0], parse_mode="HTML")
+        for s_text in steps[1:]:
+            await asyncio.sleep(0.55)
+            msg = await msg.edit_text(s_text, parse_mode="HTML")
+        await asyncio.sleep(0.55)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+        await send_and_track(
+            context.bot,
+            user_id,
+            query.message.chat_id,
+            query.message.reply_text(
+                get_error_403_text(lang),
+                parse_mode="HTML",
+                reply_markup=get_error_403_keyboard(lang)
+            )
+        )
+        return
+
+    if data == "activation1":
+        if lang == "en":
+            text = (
+                "🔐 <b>ACTIVATION [1] — COMPLETE EXTERNAL VERIFICATION</b>\n\n"
+                "This option unlocks access by completing the required step on our external page. "
+                "Full instructions are shown on the page itself—open the link below, complete the step cleanly, "
+                "and then return here to continue."
+            )
+            btn_open = "🌐 OPEN ACTIVATION PAGE"
+            btn_back = "🔙 BACK"
+        else:
+            text = (
+                "🔐 <b>ACTIVATION [1] — KAMILISHA HATUA YA TOVUTI</b>\n\n"
+                "Njia hii inafungua ufikiaji wako kwa kukamilisha hatua iliyoandaliwa kwenye ukurasa wetu wa nje. "
+                "Maelezo kamili yapo kwenye tovuti yenyewe—fungua link hapa chini, maliza hatua hiyo vizuri, "
+                "kisha rudi hapa kuendelea."
+            )
+            btn_open = "🌐 FUNGUA TOVUTI YA ACTIVATION"
+            btn_back = "🔙 RUDI"
+
+        await query.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(btn_open, url=CPA_LINK)],
+                [InlineKeyboardButton(btn_back, callback_data="back_to_error")]
+            ])
+        )
+        return
+
+    if data == "activation2":
+        ref_count = get_referral_count(user_id)
+        ref_link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
+
+        if lang == "en":
+            text = (
+                "👥 <b>ACTIVATION [2] — 10 NEW REFERRALS (FREE UNLOCK)</b>\n\n"
+                "Share your personal invite link with friends or groups. Once <b>10 brand-new users</b> "
+                "(people who have never used the bot before) join through your link, your access unlocks automatically for free.\n\n"
+                f"🔗 <b>Your Invite Link:</b>\n<code>{ref_link}</code>\n\n"
+                f"📊 <b>Verified New Referrals:</b> <code>{ref_count}/10</code>"
+            )
+            btn_check = "🔄 CHECK COUNT"
+            btn_back = "🔙 BACK"
+        else:
+            text = (
+                "👥 <b>ACTIVATION [2] — WAALIKO WAPYA 10 (BURE)</b>\n\n"
+                "Sambaza link yako binafsi kwa marafiki au kwenye magroup. Ukifikisha <b>watumiaji wapya 10</b> "
+                "(ambao hawajawahi kutumia bot hii kabla) waliojiunga kupitia link yako, utafunguliwa moja kwa moja bure.\n\n"
+                f"🔗 <b>Link yako ya Mwaliko:</b>\n<code>{ref_link}</code>\n\n"
+                f"📊 <b>Waliojiunga Wapya:</b> <code>{ref_count}/10</code>"
+            )
+            btn_check = "🔄 CHEKI IDADI"
+            btn_back = "🔙 RUDI"
+
+        await query.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(btn_check, callback_data="check_refs")],
+                [InlineKeyboardButton(btn_back, callback_data="back_to_error")]
+            ])
+        )
+        return
+
+    if data == "check_refs":
+        ref_count = get_referral_count(user_id)
+        if ref_count < 10:
+            alert_txt = (
+                f"🚫 You need 10 NEW referrals to unlock.\nCurrent count: {ref_count}/10"
+                if lang == "en"
+                else f"🚫 Bado hujatimiza referrals 10 mpya.\nIdadi yako: {ref_count}/10"
+            )
+            await query.answer(alert_txt, show_alert=True)
+        else:
+            await send_and_track(
+                context.bot,
+                user_id,
+                query.message.chat_id,
+                query.message.reply_text(
+                    get_verified_success_text(lang),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🟢 OPEN CONNECTION SITE" if lang == "en" else "🟢 FUNGUA TOVUTI YA CONNECTION", url=TARGET_SITE)],
+                        [InlineKeyboardButton("🔙 BACK TO REGIONS" if lang == "en" else "🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
+                    ])
+                )
+            )
+        return
+
+    if data == "activation3":
+        if lang == "en":
+            text = (
+                "💳 <b>ACTIVATION [3] — FAST DIRECT PAYMENT</b>\n\n"
+                "Get fast activation by completing a direct payment using the option that matches your country or card:\n"
+                "• <b>Tanzania:</b> TZS 4,500\n"
+                "• <b>Kenya:</b> KSH 230\n"
+                "• <b>Uganda:</b> UGX 7,500\n"
+                "• <b>International Card:</b> USD $3\n\n"
+                "After completing payment on the checkout page, open the bot activation link provided to activate your account."
+            )
+            btn_back = "🔙 BACK"
+        else:
+            text = (
+                "💳 <b>ACTIVATION [3] — MALIPO YA HARAKA YA MOJA KWA MOJA</b>\n\n"
+                "Pata activation ya haraka kwa kukamilisha malipo kupitia chaguo linalolingana na nchi au kadi yako:\n"
+                "• <b>Tanzania:</b> TZS 4,500\n"
+                "• <b>Kenya:</b> KSH 230\n"
+                "• <b>Uganda:</b> UGX 7,500\n"
+                "• <b>International Card:</b> USD $3\n\n"
+                "Ukishamaliza kulipa kwenye ukurasa wa malipo, fungua link ya activation ya bot utayopewa ili kuwezesha akaunti yako."
+            )
+            btn_back = "🔙 RUDI"
+
+        await query.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🇹🇿 Tanzania — TZS 4,500", url=PAY_LINK_TZ)],
+                [InlineKeyboardButton("🇰🇪 Kenya — KSH 230", url=PAY_LINK_KE)],
+                [InlineKeyboardButton("🇺🇬 Uganda — UGX 7,500", url=PAY_LINK_UG)],
+                [InlineKeyboardButton("💳 International Card — USD $3", url=PAY_LINK_INTL)],
+                [InlineKeyboardButton(btn_back, callback_data="back_to_error")]
+            ])
+        )
+        return
+
+    if data == "back_to_error":
+        await query.message.edit_text(
+            get_error_403_text(lang),
+            parse_mode="HTML",
+            reply_markup=get_error_403_keyboard(lang)
+        )
+        return
+
+    if data in ("back", "back_to_regions"):
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await proceed_to_regions(query.message, user_id)
 
 
-# --- ADMIN PANEL ---
+# --- BROADCAST FORMATTING & MULTI-BUTTON PARSER ---
+def parse_broadcast_text_and_buttons(raw_text):
+    """
+    Supports:
+    - Full Telegram HTML tags in message text (<b>, <i>, <u>, <s>, <code>, <pre>, <tg-spoiler>, <blockquote>, <a href="...">)
+    - Multiple inline buttons at the end of the text:
+        * One button per line: `Button Label | https://example.com`
+        * Multiple buttons on the same row separated by `||`: `Btn 1 | https://a.com || Btn 2 | https://b.com`
+    """
+    if not raw_text:
+        return "", None
+
+    lines = raw_text.split("\n")
+    body_lines = []
+    button_rows = []
+    url_pattern = re.compile(r"^https?://", re.IGNORECASE)
+
+    # Parse trailing button lines
+    trailing_mode = True
+    reversed_button_rows = []
+
+    for line in reversed(lines):
+        stripped = line.strip()
+        if trailing_mode and stripped and "|" in stripped:
+            segments = [seg.strip() for seg in stripped.split("||")]
+            row_buttons = []
+            valid_row = True
+            for seg in segments:
+                if "|" not in seg:
+                    valid_row = False
+                    break
+                label, target = seg.split("|", 1)
+                label = label.strip()
+                target = target.strip()
+                if not label or not url_pattern.match(target):
+                    valid_row = False
+                    break
+                tracked_url = f"{RENDER_EXTERNAL_URL}/click?url={quote(target, safe='')}"
+                row_buttons.append(InlineKeyboardButton(label, url=tracked_url))
+            if valid_row and row_buttons:
+                reversed_button_rows.append(row_buttons)
+                continue
+        trailing_mode = False
+        body_lines.append(line)
+
+    body_lines.reverse()
+    reversed_button_rows.reverse()
+    button_rows = reversed_button_rows
+
+    clean_text = "\n".join(body_lines).strip()
+    markup = InlineKeyboardMarkup(button_rows) if button_rows else None
+    return clean_text, markup
+
+
+def get_admin_home_text_and_kb():
+    total_users = get_total_users_count()
+    c_counts = get_users_by_country_counts()
+    text = (
+        "👑 <b>Tanzania Connection - Master Admin Panel</b>\n\n"
+        f"👥 Total Users: <code>{total_users}</code>\n"
+        f"🇹🇿 Tanzania: <code>{c_counts['Tanzania']}</code> | "
+        f"🇰🇪 Kenya: <code>{c_counts['Kenya']}</code> | "
+        f"🇺🇬 Uganda: <code>{c_counts['Uganda']}</code>\n"
+        f"🌐 Unset: <code>{c_counts['Unset']}</code>\n\n"
+        "Chagua huduma unayotaka kusimamia hapa chini:"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Takwimu & Nchi", callback_data="admin_stats"),
+         InlineKeyboardButton("👥 Watumiaji", callback_data="admin_users")],
+        [InlineKeyboardButton("🔍 Angalia Order", callback_data="admin_check_order"),
+         InlineKeyboardButton("📢 Rich Broadcast", callback_data="admin_broadcast_menu")],
+        [InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
+    ])
+    return text, kb
+
+
+def get_broadcast_composer_text_and_kb(admin_id):
+    draft = admin_broadcast_drafts.get(str(admin_id), {"items": [], "text": ""})
+    items = draft.get("items", [])
+    text_val = draft.get("text", "")
+
+    photos_cnt = sum(1 for it in items if it["type"] == "photo")
+    videos_cnt = sum(1 for it in items if it["type"] == "video")
+    total_recipients = get_total_users_count()
+
+    preview_snippet = text_val if text_val else "<i>(Hakuna maandishi bado)</i>"
+    if len(preview_snippet) > 400:
+        preview_snippet = preview_snippet[:400] + "..."
+
+    msg = (
+        "📢 <b>RICH MEDIA & MULTI-BUTTON BROADCAST STUDIO</b>\n\n"
+        f"👥 Recipients: <b>{total_recipients}</b>\n"
+        f"🖼 Photos attached: <b>{photos_cnt}</b> | 🎬 Videos attached: <b>{videos_cnt}</b>\n"
+        f"📝 Text / Caption set: <b>{'Yes' if text_val else 'No'}</b>\n\n"
+        "<b>Current Text / Buttons Source:</b>\n"
+        f"{preview_snippet}\n\n"
+        "<b>How to compose (unlimited media items):</b>\n"
+        "• Send any number of <b>Photos</b> or <b>Videos</b>—each one adds to your media batch.\n"
+        "• Send a <b>Text message</b> (or media caption) to set/update the message text.\n"
+        "• Formatting supported: <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;u&gt;</code>, "
+        "<code>&lt;s&gt;</code>, <code>&lt;code&gt;</code>, <code>&lt;blockquote&gt;</code>, "
+        "<code>&lt;tg-spoiler&gt;</code>.\n"
+        "• Multi-button syntax at end of text:\n"
+        "  <code>Button 1 | https://link1.com</code>\n"
+        "  <code>Row2 BtnA | https://a.com || Row2 BtnB | https://b.com</code>"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("👁️ Hakiki (Preview)", callback_data="bcast_preview"),
+         InlineKeyboardButton("🗑 Futa Media/Text", callback_data="bcast_clear")],
+        [InlineKeyboardButton("🚀 Tuma Sasa", callback_data="bcast_send")],
+        [InlineKeyboardButton("🔙 Rudi Menyu", callback_data="admin_home")]
+    ])
+    return msg, kb
+
+
+# --- ADMIN PANEL HANDLERS ---
 async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(ADMIN_ID):
         return
-    total_users = get_total_users_count()
-    await update.message.reply_text(
-        f"👑 <b>Tanzania Connection - Master Admin Panel</b>\n\n"
-        f"👥 Total Users: <code>{total_users}</code>\n"
-        f"Chagua huduma unayotaka kusimamia hapa chini:",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Takwimu za Jumla", callback_data="admin_stats"),
-             InlineKeyboardButton("💰 Salio la Stany Pay", callback_data="admin_wallet")],
-            [InlineKeyboardButton("👥 Orodha ya Watumiaji", callback_data="admin_users"),
-             InlineKeyboardButton("🔍 Angalia Order", callback_data="admin_check_order")],
-            [InlineKeyboardButton("📢 Tuma Tangazo", callback_data="admin_broadcast_prompt"),
-             InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
-        ])
-    )
+    context.user_data.pop("admin_mode", None)
+    text, kb = get_admin_home_text_and_kb()
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
 
-async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, main_app):
     query = update.callback_query
-    if str(query.from_user.id) != str(ADMIN_ID):
+    admin_uid = str(query.from_user.id)
+    if admin_uid != str(ADMIN_ID):
         return
     await query.answer()
+    data = query.data
 
-    if query.data == "admin_stats":
+    if data == "admin_home":
+        context.user_data.pop("admin_mode", None)
+        text, kb = get_admin_home_text_and_kb()
+        await query.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        return
+
+    if data == "admin_stats":
         total_users = get_total_users_count()
+        c_counts = get_users_by_country_counts()
         await query.message.edit_text(
-            f"📊 <b>SYSTEM STATISTICS</b>\n\n"
-            f"👥 Total Registered Users: <code>{total_users}</code>\n"
-            f"🚀 System Status: <b>Online & Stable 24/7</b>\n\n"
-            f"Bonyeza kitufe hapa chini kurudi:",
+            "📊 <b>SYSTEM & COUNTRY STATISTICS</b>\n\n"
+            f"👥 Total Users: <code>{total_users}</code>\n"
+            f"🇹🇿 Tanzania: <code>{c_counts['Tanzania']}</code>\n"
+            f"🇰🇪 Kenya: <code>{c_counts['Kenya']}</code>\n"
+            f"🇺🇬 Uganda: <code>{c_counts['Uganda']}</code>\n"
+            f"🌐 Unset: <code>{c_counts['Unset']}</code>\n"
+            "🚀 Status: <b>Online & Stable 24/7</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
-    elif query.data == "admin_wallet":
-        profile_info = "Unavailable"
-        try:
-            resp = await asyncio.to_thread(stany_request, "GET", "/api/v1/me")
-            if resp.status_code == 200 and resp.content:
-                data = resp.json()
-                username = data.get("username", "N/A")
-                balance = data.get("balance", data.get("txCoins", data.get("wallet_balance", "N/A")))
-                profile_info = f"User: <code>{username}</code>\nBalance: <code>{balance}</code>"
-        except Exception:
-            pass
-        await query.message.edit_text(
-            f"💰 <b>STANY PAY ACCOUNT & BALANCE</b>\n\n"
-            f"{profile_info}\n\n"
-            f"Bonyeza kitufe hapa chini kurudi:",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
-        )
-    elif query.data == "admin_users":
+        return
+
+    if data == "admin_users":
         total_users = get_total_users_count()
+        c_counts = get_users_by_country_counts()
         users = get_all_users()
         recent = ", ".join(users[-5:]) if users else "Hakuna"
         await query.message.edit_text(
-            f"👥 <b>WATUMIAJI WA MFUMO</b>\n\n"
-            f"📈 Jumla ya Waliojiunga: <code>{total_users}</code>\n"
-            f"🆔 ID za Watumiaji wa mwisho 5: <code>{recent}</code>\n\n"
-            f"Bonyeza kitufe hapa chini kurudi:",
+            "👥 <b>WATUMIAJI KWA NCHI</b>\n\n"
+            f"📈 Jumla Kuu: <code>{total_users}</code>\n"
+            f"🇹🇿 Tanzania: <code>{c_counts['Tanzania']}</code>\n"
+            f"🇰🇪 Kenya: <code>{c_counts['Kenya']}</code>\n"
+            f"🇺🇬 Uganda: <code>{c_counts['Uganda']}</code>\n"
+            f"🌐 Unset: <code>{c_counts['Unset']}</code>\n"
+            f"🆔 ID za mwisho 5: <code>{recent}</code>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
-    elif query.data == "admin_check_order":
-        context.user_data["admin_awaiting"] = ADMIN_WAITING_ORDER
+        return
+
+    if data == "admin_check_order":
+        context.user_data["admin_mode"] = ADMIN_MODE_ORDER
         await query.message.edit_text(
             "🔍 <b>ANGALIA ORDER YA MALIPO</b>\n\n"
-            "Tafadhali tuma Order Ref (mfano: SP_123456_1740000000) kwenye chat hii kukagua hali yake kwenye Stany Pay:",
+            "Tuma Order ID / Ref kwenye chat hii kuangalia rekodi yake kwenye database:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
-    elif query.data == "admin_broadcast_prompt":
-        context.user_data["admin_awaiting"] = ADMIN_WAITING_BROADCAST
-        total_recipients = get_total_users_count()
-        await query.message.edit_text(
-            f"📢 <b>MFUMO WA KUTUMA MATANGAZO (BROADCAST HUB)</b>\n\n"
-            f"👥 Walengwa waliopo kwenye Database: <b>{total_recipients}</b>\n\n"
-            "Tuma hapa <b>Ujumbe, Picha, au Video</b> unayotaka kuwatumia watumiaji wote.\n\n"
-            "💡 <i>Kama unahitaji kitufe (button) kwenye tangazo lako, andika ujumbe wako kisha Weka mstari wa mwisho kwa mfumo huu:</i>\n"
-            "<code>Jina la Kitufe | https://linkyako.com</code>\n\n"
-            "Tuma ujumbe wako sasa kuanza hakiki (preview):",
+        return
+
+    if data == "admin_broadcast_menu":
+        context.user_data["admin_mode"] = ADMIN_MODE_BROADCAST
+        admin_broadcast_drafts.setdefault(admin_uid, {"items": [], "text": ""})
+        msg, kb = get_broadcast_composer_text_and_kb(admin_uid)
+        await query.message.edit_text(msg, parse_mode="HTML", reply_markup=kb)
+        return
+
+    if data == "bcast_clear":
+        context.user_data["admin_mode"] = ADMIN_MODE_BROADCAST
+        admin_broadcast_drafts[admin_uid] = {"items": [], "text": ""}
+        msg, kb = get_broadcast_composer_text_and_kb(admin_uid)
+        await query.message.edit_text(msg, parse_mode="HTML", reply_markup=kb)
+        return
+
+    if data == "bcast_preview":
+        context.user_data["admin_mode"] = ADMIN_MODE_BROADCAST
+        draft = admin_broadcast_drafts.get(admin_uid, {"items": [], "text": ""})
+        items = draft.get("items", [])
+        clean_text, markup = parse_broadcast_text_and_buttons(draft.get("text", ""))
+
+        if len(items) > 1:
+            media_group = []
+            for idx, item in enumerate(items):
+                cap = clean_text if idx == 0 and clean_text else None
+                if item["type"] == "photo":
+                    media_group.append(InputMediaPhoto(media=item["bytes"], caption=cap, parse_mode="HTML" if cap else None))
+                else:
+                    media_group.append(InputMediaVideo(media=item["bytes"], caption=cap, parse_mode="HTML" if cap else None))
+            await query.message.reply_media_group(media=media_group)
+            if markup or (not clean_text):
+                await query.message.reply_text(
+                    "👇 <b>Buttons Preview:</b>" if markup else "ℹ️ <i>Media group previewed above.</i>",
+                    parse_mode="HTML",
+                    reply_markup=markup
+                )
+        elif len(items) == 1:
+            item = items[0]
+            if item["type"] == "photo":
+                await query.message.reply_photo(
+                    photo=item["bytes"],
+                    caption=clean_text or None,
+                    parse_mode="HTML" if clean_text else None,
+                    reply_markup=markup
+                )
+            else:
+                await query.message.reply_video(
+                    video=item["bytes"],
+                    caption=clean_text or None,
+                    parse_mode="HTML" if clean_text else None,
+                    reply_markup=markup
+                )
+        else:
+            await query.message.reply_text(
+                clean_text or "<i>(Empty broadcast)</i>",
+                parse_mode="HTML",
+                reply_markup=markup
+            )
+
+        msg, kb = get_broadcast_composer_text_and_kb(admin_uid)
+        await query.message.reply_text(msg, parse_mode="HTML", reply_markup=kb)
+        return
+
+    if data == "bcast_send":
+        context.user_data.pop("admin_mode", None)
+        draft = admin_broadcast_drafts.get(admin_uid, {"items": [], "text": ""})
+        items = draft.get("items", [])
+        clean_text, markup = parse_broadcast_text_and_buttons(draft.get("text", ""))
+
+        if not items and not clean_text:
+            await query.message.edit_text(
+                "❌ Hakuna media wala ujumbe uliowekwa. Rudi kwenye Broadcast Studio.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_broadcast_menu")]])
+            )
+            return
+
+        users = get_all_users()
+        success = 0
+        failed = 0
+        status_msg = await query.message.edit_text(f"🚀 Inatuma broadcast kwa watumiaji {len(users)}...")
+
+        for uid in users:
+            try:
+                if len(items) > 1:
+                    media_group = []
+                    for idx, item in enumerate(items):
+                        cap = clean_text if idx == 0 and clean_text else None
+                        if item["type"] == "photo":
+                            media_group.append(InputMediaPhoto(media=item["bytes"], caption=cap, parse_mode="HTML" if cap else None))
+                        else:
+                            media_group.append(InputMediaVideo(media=item["bytes"], caption=cap, parse_mode="HTML" if cap else None))
+                    await main_app.bot.send_media_group(chat_id=uid, media=media_group)
+                    if markup:
+                        await main_app.bot.send_message(
+                            chat_id=uid,
+                            text="👇" if not clean_text else "🔗",
+                            reply_markup=markup
+                        )
+                elif len(items) == 1:
+                    item = items[0]
+                    if item["type"] == "photo":
+                        await main_app.bot.send_photo(
+                            chat_id=uid,
+                            photo=item["bytes"],
+                            caption=clean_text or None,
+                            parse_mode="HTML" if clean_text else None,
+                            reply_markup=markup
+                        )
+                    else:
+                        await main_app.bot.send_video(
+                            chat_id=uid,
+                            video=item["bytes"],
+                            caption=clean_text or None,
+                            parse_mode="HTML" if clean_text else None,
+                            reply_markup=markup
+                        )
+                else:
+                    await main_app.bot.send_message(
+                        chat_id=uid,
+                        text=clean_text,
+                        parse_mode="HTML",
+                        reply_markup=markup
+                    )
+                success += 1
+                await asyncio.sleep(0.05)
+            except Exception:
+                failed += 1
+
+        admin_broadcast_drafts[admin_uid] = {"items": [], "text": ""}
+        await status_msg.edit_text(
+            "✅ <b>BROADCAST IMEKAMILIKA!</b>\n\n"
+            f"📤 Imefanikiwa: <code>{success}</code>\n"
+            f"❌ Imeshindikana: <code>{failed}</code>",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KWENYE MENYU", callback_data="admin_home")]])
         )
-    elif query.data == "admin_clean":
+        return
+
+    if data == "admin_clean":
+        user_cooldowns.clear()
         await query.message.edit_text(
             "🔄 <b>USAFISHAJI WA MFUMO</b>\n\n"
-            "Kache na kumbukumbu zote za muda mfupi zimesafishwa. Mfumo upo safi na unafanya kazi kwa kasi ya juu.\n\n"
-            "Bonyeza kitufe hapa chini kurudi:",
+            "Kache za muda mfupi zimesafishwa. Mfumo upo safi na unafanya kazi.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
-        )
-    elif query.data == "admin_home":
-        context.user_data.pop("admin_awaiting", None)
-        total_users = get_total_users_count()
-        await query.message.edit_text(
-            f"👑 <b>Tanzania Connection - Master Admin Panel</b>\n\n"
-            f"👥 Total Users: <code>{total_users}</code>\n"
-            f"Chagua huduma unayotaka kusimamia hapa chini:",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📊 Takwimu za Jumla", callback_data="admin_stats"),
-                 InlineKeyboardButton("💰 Salio la Stany Pay", callback_data="admin_wallet")],
-                [InlineKeyboardButton("👥 Orodha ya Watumiaji", callback_data="admin_users"),
-                 InlineKeyboardButton("🔍 Angalia Order", callback_data="admin_check_order")],
-                [InlineKeyboardButton("📢 Tuma Tangazo", callback_data="admin_broadcast_prompt"),
-                 InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
-            ])
         )
 
 
 async def admin_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != str(ADMIN_ID):
+    admin_uid = str(update.effective_user.id)
+    if admin_uid != str(ADMIN_ID):
         return
 
-    state = context.user_data.get("admin_awaiting")
-    if state == ADMIN_WAITING_ORDER:
-        context.user_data.pop("admin_awaiting", None)
-        await admin_receive_order(update, context)
-    elif state == ADMIN_WAITING_BROADCAST:
-        context.user_data.pop("admin_awaiting", None)
-        await admin_receive_broadcast_content(update, context)
-
-
-async def admin_receive_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != str(ADMIN_ID):
-        return
-    order_ref = update.message.text.strip()
-    order_data = get_order_details(order_ref)
-
-    api_status = "Unknown"
-    try:
-        resp = await asyncio.to_thread(stany_request, "GET", f"/api/v1/pay/status/{order_ref}")
-        if resp.content:
-            api_status = extract_payment_status(resp.json())
-    except Exception:
-        pass
-
-    if order_data:
-        uid, phone, amount, db_status = order_data
-        await update.message.reply_text(
-            f"📦 <b>MAELEZO YA ORDER: {order_ref}</b>\n\n"
-            f"👤 User ID: <code>{uid}</code>\n"
-            f"📱 Namba ya Simu: <code>{phone}</code>\n"
-            f"💵 Kiasi: <code>TZS {amount}</code>\n"
-            f"💾 Hali (DB): <code>{db_status}</code>\n"
-            f"🌐 Hali (Stany Pay API): <code>{api_status}</code>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KUBWA", callback_data="admin_home")]])
-        )
-    else:
-        await update.message.reply_text(
-            f"❌ Order Ref <code>{order_ref}</code> haipatikani kwenye database.\n(Hali ya API: {api_status})",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KUBWA", callback_data="admin_home")]])
-        )
-
-
-# --- DIRECT URL BROADCAST PREVIEW & RE-UPLOAD WORKFLOW ---
-async def admin_receive_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != str(ADMIN_ID):
+    mode = context.user_data.get("admin_mode")
+    if mode == ADMIN_MODE_ORDER:
+        context.user_data.pop("admin_mode", None)
+        order_ref = (update.message.text or "").strip()
+        order_data = get_order_details(order_ref)
+        if order_data:
+            uid, phone, amount, db_status = order_data
+            await update.message.reply_text(
+                f"📦 <b>ORDER: {order_ref}</b>\n\n"
+                f"👤 User ID: <code>{uid}</code>\n"
+                f"📱 Phone: <code>{phone}</code>\n"
+                f"💵 Amount: <code>{amount}</code>\n"
+                f"💾 Status: <code>{db_status}</code>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Order <code>{order_ref}</code> haipatikani.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
+            )
         return
 
-    msg = update.message
-    context.user_data['broadcast_msg_obj'] = msg
+    if mode == ADMIN_MODE_BROADCAST:
+        draft = admin_broadcast_drafts.setdefault(admin_uid, {"items": [], "text": ""})
+        msg = update.message
 
-    total_recipients = get_total_users_count()
+        if msg.photo:
+            tg_file = await context.bot.get_file(msg.photo[-1].file_id)
+            raw_bytes = bytes(await tg_file.download_as_bytearray())
+            draft["items"].append({"type": "photo", "bytes": raw_bytes})
+            if msg.caption:
+                draft["text"] = msg.caption
+        elif msg.video:
+            tg_file = await context.bot.get_file(msg.video.file_id)
+            raw_bytes = bytes(await tg_file.download_as_bytearray())
+            draft["items"].append({"type": "video", "bytes": raw_bytes})
+            if msg.caption:
+                draft["text"] = msg.caption
+        elif msg.text:
+            draft["text"] = msg.text
 
-    await msg.reply_text(
-        f"👁️ <b>HAKIKI YA TANGAZO (PREVIEW)</b>\n\n"
-        f"👥 Idadi ya walengwa watakaopokea: <b>{total_recipients}</b>\n"
-        f"Hivi ndivyo ujumbe wako utakavyowafikia wanachama wote hapa chini:",
-        parse_mode="HTML"
-    )
-
-    raw_text = msg.text or msg.caption or ""
-    clean_text = raw_text
-    preview_markup = None
-
-    if "|" in raw_text:
-        parts = raw_text.split("\n")
-        last_line = parts[-1]
-        if "|" in last_line:
-            btn_text, btn_url = last_line.split("|", 1)
-            clean_text = "\n".join(parts[:-1]).strip()
-            destination_url = btn_url.strip()
-            base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://connection-bot.onrender.com")
-            tracking_url = f"{base_url}/click?url={destination_url}"
-            preview_markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text.strip(), url=tracking_url)]])
-
-    if msg.photo:
-        await msg.reply_photo(photo=msg.photo[-1].file_id, caption=clean_text, parse_mode="HTML", reply_markup=preview_markup)
-    elif msg.video:
-        await msg.reply_video(video=msg.video.file_id, caption=clean_text, parse_mode="HTML", reply_markup=preview_markup)
-    else:
-        await msg.reply_text(clean_text, parse_mode="HTML", reply_markup=preview_markup)
-
-    await msg.reply_text(
-        "⚙️ <b>Ungependa kufanya nini sasa?</b>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚀 TUMA KWA WOTE SASA", callback_data="admin_confirm_broadcast")],
-            [InlineKeyboardButton("❌ GHAIRI / SITISHA", callback_data="admin_cancel_broadcast")]
-        ])
-    )
-
-
-async def admin_confirm_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, main_app):
-    query = update.callback_query
-    if str(query.from_user.id) != str(ADMIN_ID):
-        return
-    await query.answer()
-
-    msg_obj = context.user_data.get('broadcast_msg_obj')
-    if not msg_obj:
-        await query.message.edit_text("❌ Hakuna ujumbe uliopatikana wa kutuma. Tafadhali jaribu tena.")
+        composer_msg, composer_kb = get_broadcast_composer_text_and_kb(admin_uid)
+        await msg.reply_text(composer_msg, parse_mode="HTML", reply_markup=composer_kb)
         return
 
-    users = get_all_users()
-    success = 0
-    failed = 0
-
-    status_msg = await query.message.edit_text(f"🚀 Inaanza kutuma tangazo kwa watumiaji {len(users)} kupitia Main Bot...")
-
-    raw_text = msg_obj.text or msg_obj.caption or ""
-    clean_text = raw_text
-    final_markup = None
-    destination_url = ""
-
-    if "|" in raw_text:
-        parts = raw_text.split("\n")
-        last_line = parts[-1]
-        if "|" in last_line:
-            btn_text, btn_url = last_line.split("|", 1)
-            clean_text = "\n".join(parts[:-1]).strip()
-            destination_url = btn_url.strip()
-            base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://connection-bot.onrender.com")
-            tracking_url = f"{base_url}/click?url={destination_url}"
-            final_markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text.strip(), url=tracking_url)]])
-
-    media_file_bytes = None
-    media_type = None
-    if msg_obj.photo:
-        media_type = "photo"
-        file_obj = await context.bot.get_file(msg_obj.photo[-1].file_id)
-        media_file_bytes = await file_obj.download_as_bytearray()
-    elif msg_obj.video:
-        media_type = "video"
-        file_obj = await context.bot.get_file(msg_obj.video.file_id)
-        media_file_bytes = await file_obj.download_as_bytearray()
-
-    for uid in users:
-        try:
-            if media_type == "photo":
-                await main_app.bot.send_photo(chat_id=uid, photo=bytes(media_file_bytes), caption=clean_text, parse_mode="HTML", reply_markup=final_markup)
-            elif media_type == "video":
-                await main_app.bot.send_video(chat_id=uid, video=bytes(media_file_bytes), caption=clean_text, parse_mode="HTML", reply_markup=final_markup)
-            else:
-                await main_app.bot.send_message(chat_id=uid, text=clean_text, parse_mode="HTML", reply_markup=final_markup)
-            success += 1
-            await asyncio.sleep(0.04)
-        except Exception:
-            failed += 1
-
-    clicks = get_click_count_for_url(destination_url) if destination_url else 0
-    await status_msg.edit_text(
-        f"✅ <b>TANGAZO LIMETUMWA KIKAMILIFU!</b>\n\n"
-        f"📤 Imefanikiwa Kutumika: <code>{success}</code>\n"
-        f"❌ Imeshindikana: <code>{failed}</code>\n"
-        f"📊 Jumla ya Clicks: <code>{clicks}</code>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KWENYE MENYU", callback_data="admin_home")]])
-    )
-
-
-async def admin_cancel_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if str(query.from_user.id) != str(ADMIN_ID):
-        return
-    await query.answer()
-    await query.message.edit_text(
-        "❌ <b>Utumaji wa tangazo umesitishwa. Hakuna kilichotumwa.</b>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KWENYE MENYU", callback_data="admin_home")]])
-    )
+    text, kb = get_admin_home_text_and_kb()
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 # --- FLASK WEB SERVER WITH CLICK ANALYTICS REDIRECT ---
 app = Flask(__name__)
 
 
-@app.route('/')
+@app.route("/")
 def home():
-    return "Connection Bot Fully Upgraded & Running 24/7!"
+    return "Connection Bot Running 24/7!"
 
 
-@app.route('/click')
+@app.route("/click")
 def click_redirect():
-    target_url = request.args.get('url', TARGET_SITE)
+    target_url = request.args.get("url", TARGET_SITE)
+    if not re.match(r"^https?://", target_url, re.IGNORECASE):
+        target_url = TARGET_SITE
     log_broadcast_click("user", target_url)
     return redirect(target_url)
 
@@ -910,19 +1431,61 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 
-# --- AUTOMATION LOOP ---
+# --- BACKGROUND LOOP: 2-DAY AUTO-DELETE + REGION KEYBOARD RETURN & WEEKLY BACKUP ---
 async def background_automation_loop(main_app):
+    last_backup_key = None
     while True:
-        await asyncio.sleep(3600)
-        now = datetime.utcnow()
-        if now.weekday() == 0 and now.hour == 3:
+        await asyncio.sleep(60)
+        now_ts = time.time()
+        cutoff_ts = now_ts - TWO_DAYS_SECONDS
+
+        expired_rows = get_expired_messages(cutoff_ts)
+        if expired_rows:
+            processed_ids = []
+            notified_users = set()
+
+            for row_id, uid, chat_id, msg_id in expired_rows:
+                try:
+                    await main_app.bot.delete_message(chat_id=int(chat_id), message_id=int(msg_id))
+                except Exception:
+                    pass
+                processed_ids.append(row_id)
+
+                if uid not in notified_users:
+                    notified_users.add(uid)
+                    lang = get_user_language(uid)
+                    country = get_user_country(uid) or "Tanzania"
+                    return_msg = (
+                        "⏳ <b>Old messages were cleared after 2 days.</b>\n\n"
+                        "📍 Pick your region below to continue:"
+                        if lang == "en"
+                        else "⏳ <b>Ujumbe wa siku 2 umefutwa kiotomatiki.</b>\n\n"
+                        "📍 Chagua mkoa wako hapa chini kuendelea:"
+                    )
+                    try:
+                        await main_app.bot.send_message(
+                            chat_id=int(chat_id),
+                            text=return_msg,
+                            parse_mode="HTML",
+                            reply_markup=get_region_keyboard(country)
+                        )
+                    except Exception:
+                        pass
+
+            delete_tracked_messages_by_ids(processed_ids)
+
+        # Weekly Monday 03:00 UTC database backup to admin
+        now_dt = datetime.utcnow()
+        backup_key = now_dt.strftime("%Y-%W")
+        if now_dt.weekday() == 0 and now_dt.hour == 3 and last_backup_key != backup_key:
+            last_backup_key = backup_key
             if os.path.exists(DB_PATH) and ADMIN_ID:
                 try:
                     with open(DB_PATH, "rb") as db_file:
                         await main_app.bot.send_document(
-                            chat_id=ADMIN_ID,
+                            chat_id=int(ADMIN_ID),
                             document=db_file,
-                            caption=f"📦 <b>AUTOMATED WEEKLY DATABASE BACKUP</b>\n📅 {now.strftime('%Y-%m-%d %H:%M:%S')} UTC",
+                            caption=f"📦 <b>AUTOMATED WEEKLY DATABASE BACKUP</b>\n📅 {now_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC",
                             parse_mode="HTML"
                         )
                 except Exception:
@@ -941,15 +1504,15 @@ async def main():
 
     # Main Bot Handlers
     main_app.add_handler(CommandHandler("start", start))
+    main_app.add_handler(CommandHandler("country", cmd_country))
+    main_app.add_handler(CommandHandler("language", cmd_language))
     main_app.add_handler(CallbackQueryHandler(age_callback, pattern="^age_"))
     main_app.add_handler(CallbackQueryHandler(handle_callback))
     main_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
     # Admin Bot Handlers
     admin_app.add_handler(CommandHandler("start", admin_start))
-    admin_app.add_handler(CallbackQueryHandler(lambda u, c: admin_confirm_broadcast_callback(u, c, main_app), pattern="^admin_confirm_broadcast$"))
-    admin_app.add_handler(CallbackQueryHandler(admin_cancel_broadcast_callback, pattern="^admin_cancel_broadcast$"))
-    admin_app.add_handler(CallbackQueryHandler(admin_callback))
+    admin_app.add_handler(CallbackQueryHandler(lambda u, c: admin_callback(u, c, main_app)))
     admin_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, admin_message_router))
 
     await main_app.initialize()
@@ -962,7 +1525,7 @@ async def main():
 
     asyncio.create_task(background_automation_loop(main_app))
 
-    print("🤖 Upgraded Main Bot & Master Admin Panel running successfully with zero errors!")
+    logger.info("Main Bot & Master Admin Panel running successfully.")
 
     stop_event = asyncio.Event()
     await stop_event.wait()
