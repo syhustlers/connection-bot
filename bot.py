@@ -26,7 +26,7 @@ from database import (
     get_total_users_count, get_users_by_country_counts,
     get_seen_images, add_seen_image, reset_seen_images,
     get_order_details, is_user_activated,
-    log_broadcast_click, get_click_count_for_url,
+    log_broadcast_click,
     track_user_message, get_expired_messages, delete_tracked_messages_by_ids,
     DB_PATH
 )
@@ -108,8 +108,10 @@ ALL_REGIONS = {
     reg for region_list in REGIONS_BY_COUNTRY.values() for reg in region_list
 }
 
+SWITCH_KB_LABELS = {"🌍 Nchi / Lugha", "🌍 Country / Lang"}
 
-def get_region_keyboard(country=None):
+
+def get_region_keyboard(country=None, lang="sw"):
     selected_country = country if country in REGIONS_BY_COUNTRY else "Tanzania"
     regions = REGIONS_BY_COUNTRY[selected_country]
     keyboard = []
@@ -129,6 +131,9 @@ def get_region_keyboard(country=None):
         else:
             idx += 1
         keyboard.append(row)
+
+    switch_label = "🌍 Country / Lang" if lang == "en" else "🌍 Nchi / Lugha"
+    keyboard.append([KeyboardButton(switch_label)])
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
@@ -392,6 +397,27 @@ def get_verified_success_text(lang):
     )
 
 
+def get_verified_success_keyboard(lang):
+    if lang == "en":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🟢 OPEN CONNECTION SITE", url=TARGET_SITE)],
+            [
+                InlineKeyboardButton("🌍 COUNTRY", callback_data="pick_country"),
+                InlineKeyboardButton("🌐 LANGUAGE", callback_data="pick_language")
+            ],
+            [InlineKeyboardButton("🔙 BACK TO REGIONS", callback_data="back_to_regions")]
+        ])
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 FUNGUA TOVUTI YA CONNECTION", url=TARGET_SITE)],
+        [
+            InlineKeyboardButton("🌍 NCHI", callback_data="pick_country"),
+            InlineKeyboardButton("🌐 LUGHA", callback_data="pick_language")
+        ],
+        [InlineKeyboardButton("🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
+    ])
+
+
 def get_error_403_text(lang):
     if lang == "en":
         return (
@@ -434,12 +460,6 @@ def get_error_403_keyboard(lang):
 
 
 def get_country_keyboard(lang):
-    if lang == "en":
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🇹🇿 Tanzania", callback_data="set_country_Tanzania")],
-            [InlineKeyboardButton("🇰🇪 Kenya", callback_data="set_country_Kenya")],
-            [InlineKeyboardButton("🇺🇬 Uganda", callback_data="set_country_Uganda")]
-        ])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🇹🇿 Tanzania", callback_data="set_country_Tanzania")],
         [InlineKeyboardButton("🇰🇪 Kenya", callback_data="set_country_Kenya")],
@@ -519,7 +539,7 @@ async def proceed_to_regions(message, user_id):
         message.get_bot(),
         user_id,
         message.chat_id,
-        message.reply_text(welcome_text, parse_mode="HTML", reply_markup=get_region_keyboard(country))
+        message.reply_text(welcome_text, parse_mode="HTML", reply_markup=get_region_keyboard(country, lang))
     )
 
 
@@ -538,7 +558,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ACTIVATION_SECRET_CODE and payload_arg == ACTIVATION_SECRET_CODE:
             set_user_activated(user_id, True)
             lang = get_user_language(user_id)
-            country = get_user_country(user_id) or "Tanzania"
             success_msg = (
                 "✅ <b>ACTIVATION LINK VERIFIED!</b>\n\nYour premium access is now active."
                 if lang == "en"
@@ -558,10 +577,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     get_verified_success_text(lang),
                     parse_mode="HTML",
                     disable_web_page_preview=True,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🟢 OPEN CONNECTION SITE" if lang == "en" else "🟢 FUNGUA TOVUTI YA CONNECTION", url=TARGET_SITE)],
-                        [InlineKeyboardButton("🔙 BACK TO REGIONS" if lang == "en" else "🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
-                    ])
+                    reply_markup=get_verified_success_keyboard(lang)
                 )
             )
             return
@@ -675,6 +691,10 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     saved_country = get_user_country(user_id)
     text = (update.message.text or "").strip()
 
+    if text in SWITCH_KB_LABELS:
+        await send_country_prompt(update.message, lang)
+        return
+
     if text in ALL_REGIONS:
         effective_country = detect_country_for_region(text, saved_country)
         if not saved_country:
@@ -718,6 +738,8 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 "👇 <b>Tap the button below to connect immediately</b> 👇"
             )
             btn_connect = "🔗 CONNECT NOW"
+            btn_country = "🌍 COUNTRY"
+            btn_lang = "🌐 LANGUAGE"
             btn_back_reg = "🔙 BACK TO REGIONS"
         else:
             caption = (
@@ -731,6 +753,8 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 "👇 <b>Bonyeza kitufe hapa chini kuunganishwa nae mara moja</b> 👇"
             )
             btn_connect = "🔗 KUONGANISHWA NAE"
+            btn_country = "🌍 NCHI"
+            btn_lang = "🌐 LUGHA"
             btn_back_reg = "🔙 RUDI KWENYE MKOA"
 
         await send_and_track(
@@ -743,6 +767,10 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(btn_connect, callback_data="get_connection")],
+                    [
+                        InlineKeyboardButton(btn_country, callback_data="pick_country"),
+                        InlineKeyboardButton(btn_lang, callback_data="pick_language")
+                    ],
                     [InlineKeyboardButton(btn_back_reg, callback_data="back_to_regions")]
                 ])
             )
@@ -762,7 +790,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         update.message.reply_text(
             fallback_text,
             parse_mode="HTML",
-            reply_markup=get_region_keyboard(saved_country or "Tanzania")
+            reply_markup=get_region_keyboard(saved_country or "Tanzania", lang)
         )
     )
 
@@ -833,10 +861,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     get_verified_success_text(lang),
                     parse_mode="HTML",
                     disable_web_page_preview=True,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🟢 OPEN CONNECTION SITE" if lang == "en" else "🟢 FUNGUA TOVUTI YA CONNECTION", url=TARGET_SITE)],
-                        [InlineKeyboardButton("🔙 BACK TO REGIONS" if lang == "en" else "🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
-                    ])
+                    reply_markup=get_verified_success_keyboard(lang)
                 )
             )
             return
@@ -961,10 +986,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     get_verified_success_text(lang),
                     parse_mode="HTML",
                     disable_web_page_preview=True,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🟢 OPEN CONNECTION SITE" if lang == "en" else "🟢 FUNGUA TOVUTI YA CONNECTION", url=TARGET_SITE)],
-                        [InlineKeyboardButton("🔙 BACK TO REGIONS" if lang == "en" else "🔙 RUDI KWENYE MKOA", callback_data="back_to_regions")]
-                    ])
+                    reply_markup=get_verified_success_keyboard(lang)
                 )
             )
         return
@@ -1036,10 +1058,8 @@ def parse_broadcast_text_and_buttons(raw_text):
 
     lines = raw_text.split("\n")
     body_lines = []
-    button_rows = []
     url_pattern = re.compile(r"^https?://", re.IGNORECASE)
 
-    # Parse trailing button lines
     trailing_mode = True
     reversed_button_rows = []
 
@@ -1069,10 +1089,9 @@ def parse_broadcast_text_and_buttons(raw_text):
 
     body_lines.reverse()
     reversed_button_rows.reverse()
-    button_rows = reversed_button_rows
 
     clean_text = "\n".join(body_lines).strip()
-    markup = InlineKeyboardMarkup(button_rows) if button_rows else None
+    markup = InlineKeyboardMarkup(reversed_button_rows) if reversed_button_rows else None
     return clean_text, markup
 
 
@@ -1467,7 +1486,7 @@ async def background_automation_loop(main_app):
                             chat_id=int(chat_id),
                             text=return_msg,
                             parse_mode="HTML",
-                            reply_markup=get_region_keyboard(country)
+                            reply_markup=get_region_keyboard(country, lang)
                         )
                     except Exception:
                         pass
