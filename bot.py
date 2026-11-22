@@ -37,17 +37,74 @@ ADMIN_BOT_TOKEN = os.environ.get("ADMIN_BOT_TOKEN", "")
 ADMIN_ID = os.environ.get("ADMIN_ID", "")
 DEFAULT_ACTIVATION_CODE = "vip_unlock_9842"
 ACTIVATION_SECRET_CODE = (os.environ.get("ACTIVATION_SECRET_CODE") or DEFAULT_ACTIVATION_CODE).strip()
+ACTIVATION_CODES = {code for code in (DEFAULT_ACTIVATION_CODE, ACTIVATION_SECRET_CODE) if code}
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "connectiontzzbot").lstrip("@")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://connection-bot.onrender.com").rstrip("/")
 
 # --- LINKS & CHANNELS ---
 CPA_LINK = "https://tinyurl.com/Activebot"
-PAY_LINK_TZ = "https://nexus.stanyxpro.com/pay/connection-bot-subscription-mwpyeqqj"
-PAY_LINK_KE = "https://nexus.stanyxpro.com/pay/connection-bot-subscription-mwrg696v"
-PAY_LINK_UG = "https://nexus.stanyxpro.com/pay/connection-bot-subscription-mwrgfhtt"
-PAY_LINK_INTL = "https://nexus.stanyxpro.com/pay/connection-bot-subscription-mwrgc952"
 
-TARGET_SITE = "https://www.tanzaniaraha.com/"
+COUNTRY_CONFIG = {
+    "Tanzania": {
+        "flag": "🇹🇿",
+        "price_label": "TSH 5,500",
+        "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwpyeqqj",
+        "site_url": "https://www.exotictanzania.com",
+        "site_name": "Exotic Tanzania",
+        "intl_only": False,
+    },
+    "Kenya": {
+        "flag": "🇰🇪",
+        "price_label": "KES 270",
+        "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrg696v",
+        "site_url": "https://www.exotickenya.com",
+        "site_name": "Exotic Kenya",
+        "intl_only": False,
+    },
+    "Uganda": {
+        "flag": "🇺🇬",
+        "price_label": "UGX 9,000",
+        "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrgfhtt",
+        "site_url": "https://www.exoticuganda.com",
+        "site_name": "Exotic Uganda",
+        "intl_only": False,
+    },
+    "Ghana": {
+        "flag": "🇬🇭",
+        "price_label": "GHS 25",
+        "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwro6u2b",
+        "site_url": "https://www.exoticghana.com",
+        "site_name": "Exotic Ghana",
+        "intl_only": False,
+    },
+    "Nigeria": {
+        "flag": "🇳🇬",
+        "price_label": "NGN 3,000",
+        "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwro3lcp",
+        "site_url": "https://www.exoticnigeria.com",
+        "site_name": "Exotic Nigeria",
+        "intl_only": False,
+    },
+    "Zimbabwe": {
+        "flag": "🇿🇼",
+        "price_label": "$ 3",
+        "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrgc952",
+        "site_url": "https://www.exoticzimbabwe.com",
+        "site_name": "Exotic Zimbabwe",
+        "intl_only": True,
+    },
+    "Ethiopia": {
+        "flag": "🇪🇹",
+        "price_label": "$ 3",
+        "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrgc952",
+        "site_url": "https://www.exoticethiopia.com",
+        "site_name": "Exotic Ethiopia",
+        "intl_only": True,
+    },
+}
+
+DEFAULT_COUNTRY = "Tanzania"
+TARGET_SITE = COUNTRY_CONFIG[DEFAULT_COUNTRY]["site_url"]
 REQUIRED_CHANNEL = "@connectiontzz"
 
 TWO_DAYS_SECONDS = 48 * 3600
@@ -65,6 +122,10 @@ ADMIN_MODE_BROADCAST = "broadcast"
 
 # Pending multi-media broadcast drafts per admin user: {admin_id: {"items": [...], "text": ""}}
 admin_broadcast_drafts = {}
+
+
+def get_country_info(country):
+    return COUNTRY_CONFIG.get(country, COUNTRY_CONFIG[DEFAULT_COUNTRY])
 
 
 async def check_antispam(user_id):
@@ -187,6 +248,27 @@ REGIONS_BY_COUNTRY = {
         "Entebbe", "Hoima", "Fort Portal", "Kasese", "Kabale", "Soroti", "Moroto", "Tororo",
         "Iganga", "Luweero", "Mityana", "Masindi", "Bushenyi", "Rukungiri", "Ntungamo", "Kapchorwa",
         "Kitgum", "Nebbi", "Pallisa", "Kamuli", "Apac", "Adjumani", "Koboko", "Yumbe", "Mubende", "Kyenjojo"
+    ],
+    "Ghana": [
+        "Greater Accra", "Ashanti", "Western", "Eastern", "Central", "Volta", "Northern",
+        "Upper East", "Upper West", "Bono", "Bono East", "Ahafo", "Savannah", "North East",
+        "Oti", "Western North"
+    ],
+    "Nigeria": [
+        "Lagos", "Abuja (FCT)", "Rivers", "Kano", "Oyo", "Edo", "Delta", "Anambra", "Enugu",
+        "Kaduna", "Ogun", "Imo", "Akwa Ibom", "Cross River", "Kwara", "Borno", "Plateau",
+        "Abia", "Adamawa", "Bauchi", "Bayelsa", "Benue", "Ebonyi", "Ekiti", "Gombe",
+        "Jigawa", "Katsina", "Kebbi", "Kogi", "Nasarawa", "Niger", "Osun", "Sokoto",
+        "Taraba", "Yobe", "Zamfara"
+    ],
+    "Zimbabwe": [
+        "Harare", "Bulawayo", "Manicaland", "Mashonaland Central", "Mashonaland East",
+        "Mashonaland West", "Masvingo", "Matabeleland North", "Matabeleland South", "Midlands"
+    ],
+    "Ethiopia": [
+        "Addis Ababa", "Dire Dawa", "Oromia", "Amhara", "Tigray", "Somali", "Sidama",
+        "Central Ethiopia", "South Ethiopia", "South West Ethiopia Peoples", "Afar",
+        "Benishangul-Gumuz", "Gambela", "Harari"
     ]
 }
 
@@ -198,7 +280,7 @@ SWITCH_KB_LABELS = {"🌍 Nchi / Lugha", "🌍 Country / Lang"}
 
 
 def get_region_keyboard(country=None, lang="sw"):
-    selected_country = country if country in REGIONS_BY_COUNTRY else "Tanzania"
+    selected_country = country if country in REGIONS_BY_COUNTRY else DEFAULT_COUNTRY
     regions = REGIONS_BY_COUNTRY[selected_country]
     keyboard = []
     idx = 0
@@ -229,7 +311,7 @@ def detect_country_for_region(region_text, user_country=None):
     for c_name, r_list in REGIONS_BY_COUNTRY.items():
         if region_text in r_list:
             return c_name
-    return user_country or "Tanzania"
+    return user_country or DEFAULT_COUNTRY
 
 
 NAMES = [
@@ -442,51 +524,42 @@ def get_rotating_profile_title(region_upper, lang):
     return random.choice(options)
 
 
-def get_verified_success_text(lang):
+def get_verified_success_text(lang, country=None):
+    info = get_country_info(country)
+    site_url = info["site_url"]
+    site_name = info["site_name"]
+    country_name = country or DEFAULT_COUNTRY
+
     if lang == "en":
         return (
             "🎉 <b>YOUR ACCOUNT IS NOW ACTIVATED!</b> ✅\n\n"
-            "Congrats! Your verification is confirmed and you now have full access to VIP connections and exclusive hubs. 💃🔥\n\n"
-            "🔗 <b>MAIN CONNECTION PORTAL:</b>\n"
-            "👉 <a href=\"https://www.tanzaniaraha.com/\">Open Tanzania Raha</a>\n\n"
-            "📢 <b>OFFICIAL VIP CHANNELS & GROUPS:</b>\n"
-            "🔗 <a href=\"https://t.me/rawexotichub\">Raw Exotic Hub</a>\n"
-            "🔗 <a href=\"https://t.me/hadithizamapenzi\">Hadithi za Mapenzi</a>\n"
-            "🔗 <a href=\"https://t.me/hunterjay12345\">Hunter Jay Channel</a>\n"
-            "🔗 <a href=\"https://t.me/+4Zp-ZGleL1tlZmU0\">VIP Group 1</a>\n"
-            "🔗 <a href=\"https://t.me/+t5wPETWeNGk1NDlk\">VIP Group 2</a>\n"
-            "🔗 <a href=\"https://t.me/+nLWCZ_D1zN8zNzg8\">VIP Group 3</a>\n"
-            "🔗 <a href=\"https://t.me/+Mn-pvG_YXqQzNTQ0\">VIP Group 4</a>\n"
-            "🔗 <a href=\"https://t.me/+xzbacOOTVwkxNjZk\">VIP Group 5</a>\n"
-            "🔗 <a href=\"https://t.me/+QeTJSEa1s2xmZTJk\">VIP Group 6</a>\n"
-            "🔗 <a href=\"https://t.me/joinchat/AAAAAEzFd9XDWqbcyqXiOg\">Archive & Vault</a>\n\n"
+            f"Your VIP access for <b>{info['flag']} {country_name}</b> is active. "
+            "Continue browsing regions or open your dedicated connection site below: 💃🔥\n\n"
+            f"🔗 <b>YOUR {country_name.upper()} CONNECTION SITE:</b>\n"
+            f"👉 <a href=\"{site_url}\">{site_name}</a>\n"
+            f"<code>{site_url}</code>\n\n"
             "👇 <i>Choose an option below or return to your regions:</i>"
         )
 
     return (
         "🎉 <b>AKAUNTI YAKO IMEWEZESHWA KIKAMILIFU!</b> ✅\n\n"
-        "Hongera! Uthibitisho wako umekubaliwa kwenye mfumo na sasa una ufikiaji kamili wa huduma zote za VIP na machapisho ya kipekee. 💃🔥\n\n"
-        "🔗 <b>TOVUTI KUU YA CONNECTION:</b>\n"
-        "👉 <a href=\"https://www.tanzaniaraha.com/\">Fungua Tanzania Raha</a>\n\n"
-        "📢 <b>VIKOSI NA CHANNELS RASMI ZA VIP:</b>\n"
-        "🔗 <a href=\"https://t.me/rawexotichub\">Raw Exotic Hub</a>\n"
-        "🔗 <a href=\"https://t.me/hadithizamapenzi\">Hadithi za Mapenzi</a>\n"
-        "🔗 <a href=\"https://t.me/hunterjay12345\">Hunter Jay Channel</a>\n"
-        "🔗 <a href=\"https://t.me/+4Zp-ZGleL1tlZmU0\">VIP Group 1</a>\n"
-        "🔗 <a href=\"https://t.me/+t5wPETWeNGk1NDlk\">VIP Group 2</a>\n"
-        "🔗 <a href=\"https://t.me/+nLWCZ_D1zN8zNzg8\">VIP Group 3</a>\n"
-        "🔗 <a href=\"https://t.me/+Mn-pvG_YXqQzNTQ0\">VIP Group 4</a>\n"
-        "🔗 <a href=\"https://t.me/+xzbacOOTVwkxNjZk\">VIP Group 5</a>\n"
-        "🔗 <a href=\"https://t.me/+QeTJSEa1s2xmZTJk\">VIP Group 6</a>\n"
-        "🔗 <a href=\"https://t.me/joinchat/AAAAAEzFd9XDWqbcyqXiOg\">Archive & Vault</a>\n\n"
+        f"Ufikiaji wako wa VIP kwa <b>{info['flag']} {country_name}</b> umekamilika. "
+        "Endelea kuchagua mikoa au fungua tovuti yako maalum ya connection hapa chini: 💃🔥\n\n"
+        f"🔗 <b>TOVUTI YAKO YA CONNECTION ({country_name.upper()}):</b>\n"
+        f"👉 <a href=\"{site_url}\">{site_name}</a>\n"
+        f"<code>{site_url}</code>\n\n"
         "👇 <i>Chagua huduma unayotaka hapa chini au rudi kwenye mikoa:</i>"
     )
 
 
-def get_verified_success_keyboard(lang):
+def get_verified_success_keyboard(lang, country=None):
+    info = get_country_info(country)
+    site_url = info["site_url"]
+    site_name = info["site_name"]
+
     if lang == "en":
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🟢 OPEN CONNECTION SITE", url=TARGET_SITE)],
+            [InlineKeyboardButton(f"🟢 OPEN {site_name.upper()}", url=site_url)],
             [
                 InlineKeyboardButton("🌍 COUNTRY", callback_data="pick_country"),
                 InlineKeyboardButton("🌐 LANGUAGE", callback_data="pick_language")
@@ -495,7 +568,7 @@ def get_verified_success_keyboard(lang):
         ])
 
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 FUNGUA TOVUTI YA CONNECTION", url=TARGET_SITE)],
+        [InlineKeyboardButton(f"🟢 FUNGUA {site_name.upper()}", url=site_url)],
         [
             InlineKeyboardButton("🌍 NCHI", callback_data="pick_country"),
             InlineKeyboardButton("🌐 LUGHA", callback_data="pick_language")
@@ -504,15 +577,19 @@ def get_verified_success_keyboard(lang):
     ])
 
 
-def get_error_403_text(lang):
+def get_error_403_text(lang, country=None):
+    info = get_country_info(country)
+    country_name = country or DEFAULT_COUNTRY
     if lang == "en":
         return (
             "🛑 <b>SYSTEM SECURITY ERROR [ERR_AUTH_403]</b> 🛑\n\n"
-            "Direct connection is temporarily locked. To protect profile privacy, complete one of the verification options below 👇"
+            f"Selected Country: <b>{info['flag']} {country_name}</b> (<b>{info['price_label']}</b>)\n"
+            "Direct connection is temporarily locked. Complete one of the verification options below 👇"
         )
     return (
         "🛑 <b>SYSTEM SECURITY ERROR [ERR_AUTH_403]</b> 🛑\n\n"
-        "Uunganishwaji umesitishwa kwa muda. Ili kulinda faragha ya mhusika, unahitaji kukamilisha uthibitisho wa mfumo kupitia mojawapo ya njia hapa chini 👇"
+        f"Nchi Iliyochaguliwa: <b>{info['flag']} {country_name}</b> (<b>{info['price_label']}</b>)\n"
+        "Uunganishwaji umesitishwa kwa muda. Kamilisha uthibitisho kupitia mojawapo ya njia hapa chini 👇"
     )
 
 
@@ -546,15 +623,25 @@ def get_error_403_keyboard(lang):
 
 
 def get_country_keyboard():
+    # Creative multi-column layout: 2-col pairs + full-width featured country rows
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🇹🇿 Tanzania", callback_data="set_country_Tanzania")],
-        [InlineKeyboardButton("🇰🇪 Kenya", callback_data="set_country_Kenya")],
-        [InlineKeyboardButton("🇺🇬 Uganda", callback_data="set_country_Uganda")]
+        [
+            InlineKeyboardButton("🇹🇿 Tanzania", callback_data="set_country_Tanzania"),
+            InlineKeyboardButton("🇰🇪 Kenya", callback_data="set_country_Kenya")
+        ],
+        [InlineKeyboardButton("🇺🇬 Uganda — East Africa Hub", callback_data="set_country_Uganda")],
+        [
+            InlineKeyboardButton("🇬🇭 Ghana", callback_data="set_country_Ghana"),
+            InlineKeyboardButton("🇳🇬 Nigeria", callback_data="set_country_Nigeria")
+        ],
+        [
+            InlineKeyboardButton("🇿🇼 Zimbabwe", callback_data="set_country_Zimbabwe"),
+            InlineKeyboardButton("🇪🇹 Ethiopia", callback_data="set_country_Ethiopia")
+        ]
     ])
 
 
 def get_language_keyboard():
-    # Same row, two columns: Swahili | English
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("🇹🇿 Swahili", callback_data="set_lang_sw"),
         InlineKeyboardButton("🇬🇧 English", callback_data="set_lang_en")
@@ -578,12 +665,12 @@ async def send_country_prompt(target_message, user_id, lang, replace_current=Fal
     if lang == "en":
         text = (
             "🌍 <b>SELECT YOUR COUNTRY</b>\n\n"
-            "Choose your country below so we load the right regions and local options for you:"
+            "Choose your country below so we load your regions, pricing, and connection site:"
         )
     else:
         text = (
             "🌍 <b>CHAGUA NCHI YAKO</b>\n\n"
-            "Chagua nchi yako hapa chini ili tukuletee mikoa na maeneo sahihi ya nchi unayotaka:"
+            "Chagua nchi yako hapa chini ili tukuletee mikoa, bei ya malipo, na tovuti yako:"
         )
 
     await clear_step_prompt(target_message.get_bot(), user_id, current_message=target_message if replace_current else None)
@@ -614,19 +701,20 @@ async def send_language_prompt(target_message, user_id, lang, replace_current=Fa
 
 async def proceed_to_regions(message, user_id, with_loader=False):
     lang = get_user_language(user_id)
-    country = get_user_country(user_id) or "Tanzania"
+    country = get_user_country(user_id) or DEFAULT_COUNTRY
+    info = get_country_info(country)
 
     if with_loader:
         loader_steps = (
             [
                 "<i>🔄 Applying your preferences...</i>",
-                f"<i>🌍 Loading {country} regions...</i>",
+                f"<i>{info['flag']} Loading {country} regions...</i>",
                 "<i>⚡ Preparing region menu...</i>"
             ]
             if lang == "en"
             else [
                 "<i>🔄 Inahifadhi chaguo lako...</i>",
-                f"<i>🌍 Inapakia mikoa ya {country}...</i>",
+                f"<i>{info['flag']} Inapakia mikoa ya {country}...</i>",
                 "<i>⚡ Inaandaa orodha ya mikoa...</i>"
             ]
         )
@@ -635,7 +723,7 @@ async def proceed_to_regions(message, user_id, with_loader=False):
     if lang == "en":
         welcome_text = (
             f"🍑 Welcome to <b>Tanzania Connection Bot</b> 🔞\n\n"
-            f"🌍 Country: <b>{country}</b>\n"
+            f"🌍 Country: <b>{info['flag']} {country}</b>\n"
             "📍 Pick your region/area below to browse active connections right now! 💃🔥\n"
             "🆓 Free 24/7 browsing!\n\n"
             "👇 <b>Choose a region from the menu below</b> 👇"
@@ -643,7 +731,7 @@ async def proceed_to_regions(message, user_id, with_loader=False):
     else:
         welcome_text = (
             f"🍑 Karibu kwenye <b>Tanzania Connection Bot</b> 🔞\n\n"
-            f"🌍 Nchi: <b>{country}</b>\n"
+            f"🌍 Nchi: <b>{info['flag']} {country}</b>\n"
             "📍 Chagua mkoa/eneo lako hapa chini uanze kutafuta connection sasa hivi! 💃🔥\n"
             "🆓 Huduma ni <b>BURE 100%</b> masaa 24/7!\n\n"
             "👇 <b>Chagua mkoa/eneo unalotaka kutoka kwenye orodha hapa chini</b> 👇"
@@ -677,17 +765,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(user_id, user.username, user.first_name, str(datetime.utcnow()))
 
     payload_arg = extract_start_payload(update, context)
-    secret_code = ACTIVATION_SECRET_CODE or DEFAULT_ACTIVATION_CODE
+    logger.info(f"/start user={user_id} payload={payload_arg!r}")
 
-    # Handle secret activation link/command without exposing the code in UI
-    if payload_arg and payload_arg == secret_code:
+    if payload_arg and payload_arg.strip() in ACTIVATION_CODES:
         set_user_activated(user_id, True)
         lang = get_user_language(user_id)
-        country = get_user_country(user_id) or "Tanzania"
+        country = get_user_country(user_id) or DEFAULT_COUNTRY
         success_msg = (
-            "✅ <b>ACTIVATION LINK VERIFIED!</b>\n\nYour premium access is now active. You can keep using the bot normally with full VIP access."
+            "✅ <b>ACTIVATION LINK VERIFIED!</b>\n\nYour VIP access is now active. You can keep using the bot normally."
             if lang == "en"
-            else "✅ <b>LINK YA ACTIVATION IMETHIBITISHWA!</b>\n\nAkaunti yako ya VIP sasa imewezeshwa kikamilifu. Unaweza kuendelea kutumia bot kawaida ukiwa na ufikiaji kamili wa VIP."
+            else "✅ <b>LINK YA ACTIVATION IMETHIBITISHWA!</b>\n\nAkaunti yako ya VIP sasa imewezeshwa kikamilifu. Unaweza kuendelea kutumia bot kawaida."
         )
         await send_and_track(
             context.bot,
@@ -704,10 +791,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id,
             update.effective_chat.id,
             update.message.reply_text(
-                get_verified_success_text(lang),
+                get_verified_success_text(lang, country),
                 parse_mode="HTML",
                 disable_web_page_preview=True,
-                reply_markup=get_verified_success_keyboard(lang)
+                reply_markup=get_verified_success_keyboard(lang, country)
             )
         )
         return
@@ -853,6 +940,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         effective_country = detect_country_for_region(text, saved_country)
         if not saved_country:
             set_user_country(user_id, effective_country)
+        info = get_country_info(effective_country)
 
         hide_kb = None
         try:
@@ -900,7 +988,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"{header}\n\n"
                 f"💋 <b>NAME:</b> {name}\n"
                 f"🎂 <b>AGE:</b> {age} Years\n"
-                f"🌍 <b>COUNTRY:</b> {effective_country}\n"
+                f"🌍 <b>COUNTRY:</b> {info['flag']} {effective_country}\n"
                 f"📍 <b>AREA:</b> {text}\n"
                 f"📞 <b>PHONE NUMBER:</b> {number}\n"
                 f"💎 <b>TYPE:</b> Verified Connection\n\n"
@@ -915,7 +1003,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"{header}\n\n"
                 f"💋 <b>JINA:</b> {name}\n"
                 f"🎂 <b>UMRI:</b> {age} Years\n"
-                f"🌍 <b>NCHI:</b> {effective_country}\n"
+                f"🌍 <b>NCHI:</b> {info['flag']} {effective_country}\n"
                 f"📍 <b>ENEO:</b> {text}\n"
                 f"📞 <b>NAMBA YA SIMU:</b> {number}\n"
                 f"💎 <b>AINA:</b> Verified Connection\n\n"
@@ -959,7 +1047,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         update.message.reply_text(
             fallback_text,
             parse_mode="HTML",
-            reply_markup=get_region_keyboard(saved_country or "Tanzania", lang)
+            reply_markup=get_region_keyboard(saved_country or DEFAULT_COUNTRY, lang)
         )
     )
 
@@ -973,6 +1061,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
     lang = get_user_language(user_id)
+    country = get_user_country(user_id) or DEFAULT_COUNTRY
     data = query.data
 
     if data == "check_sub":
@@ -1011,7 +1100,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("set_country_"):
         chosen_country = data.replace("set_country_", "", 1)
         if chosen_country not in REGIONS_BY_COUNTRY:
-            chosen_country = "Tanzania"
+            chosen_country = DEFAULT_COUNTRY
         set_user_country(user_id, chosen_country)
         await clear_step_prompt(context.bot, user_id, current_message=query.message)
         await run_paced_loader(
@@ -1061,10 +1150,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_id,
                 query.message.chat_id,
                 query.message.reply_text(
-                    get_verified_success_text(lang),
+                    get_verified_success_text(lang, country),
                     parse_mode="HTML",
                     disable_web_page_preview=True,
-                    reply_markup=get_verified_success_keyboard(lang)
+                    reply_markup=get_verified_success_keyboard(lang, country)
                 )
             )
             return
@@ -1091,7 +1180,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id,
             query.message.chat_id,
             query.message.reply_text(
-                get_error_403_text(lang),
+                get_error_403_text(lang, country),
                 parse_mode="HTML",
                 reply_markup=get_error_403_keyboard(lang)
             )
@@ -1173,60 +1262,92 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await query.answer(alert_txt, show_alert=True)
         else:
+            set_user_activated(user_id, True)
             await send_and_track(
                 context.bot,
                 user_id,
                 query.message.chat_id,
                 query.message.reply_text(
-                    get_verified_success_text(lang),
+                    get_verified_success_text(lang, country),
                     parse_mode="HTML",
                     disable_web_page_preview=True,
-                    reply_markup=get_verified_success_keyboard(lang)
+                    reply_markup=get_verified_success_keyboard(lang, country)
                 )
             )
         return
 
     if data == "activation3":
+        info = get_country_info(country)
+        intl_note_en = "\n⚠️ <i>International cards only for this country.</i>" if info["intl_only"] else ""
+        intl_note_sw = "\n⚠️ <i>Kadi za kimataifa pekee (International cards only) kwa nchi hii.</i>" if info["intl_only"] else ""
+
         if lang == "en":
             text = (
                 "💳 <b>ACTIVATION [3] — FAST DIRECT PAYMENT</b>\n\n"
-                "Get fast activation by completing a direct payment using the option that matches your country or card:\n"
-                "• <b>Tanzania:</b> TZS 4,500\n"
-                "• <b>Kenya:</b> KSH 230\n"
-                "• <b>Uganda:</b> UGX 7,500\n"
-                "• <b>International Card:</b> USD $3\n\n"
+                f"Selected Country: <b>{info['flag']} {country}</b>\n"
+                f"Required Payment: <b>{info['price_label']}</b>{intl_note_en}\n\n"
+                "All country payment options:\n"
+                "• 🇹🇿 <b>Tanzania:</b> TSH 5,500\n"
+                "• 🇰🇪 <b>Kenya:</b> KES 270\n"
+                "• 🇺🇬 <b>Uganda:</b> UGX 9,000\n"
+                "• 🇬🇭 <b>Ghana:</b> GHS 25\n"
+                "• 🇳🇬 <b>Nigeria:</b> NGN 3,000\n"
+                "• 🇿🇼 <b>Zimbabwe:</b> $ 3 (International cards only)\n"
+                "• 🇪🇹 <b>Ethiopia:</b> $ 3 (International cards only)\n\n"
                 "After completing payment on the checkout page, open the bot activation link provided to activate your account."
             )
             btn_back = "🔙 BACK"
         else:
             text = (
                 "💳 <b>ACTIVATION [3] — MALIPO YA HARAKA YA MOJA KWA MOJA</b>\n\n"
-                "Pata activation ya haraka kwa kukamilisha malipo kupitia chaguo linalolingana na nchi au kadi yako:\n"
-                "• <b>Tanzania:</b> TZS 4,500\n"
-                "• <b>Kenya:</b> KSH 230\n"
-                "• <b>Uganda:</b> UGX 7,500\n"
-                "• <b>International Card:</b> USD $3\n\n"
+                f"Nchi Iliyochaguliwa: <b>{info['flag']} {country}</b>\n"
+                f"Malipo Yanayohitajika: <b>{info['price_label']}</b>{intl_note_sw}\n\n"
+                "Chaguo zote za malipo kwa nchi:\n"
+                "• 🇹🇿 <b>Tanzania:</b> TSH 5,500\n"
+                "• 🇰🇪 <b>Kenya:</b> KES 270\n"
+                "• 🇺🇬 <b>Uganda:</b> UGX 9,000\n"
+                "• 🇬🇭 <b>Ghana:</b> GHS 25\n"
+                "• 🇳🇬 <b>Nigeria:</b> NGN 3,000\n"
+                "• 🇿🇼 <b>Zimbabwe:</b> $ 3 (International cards only)\n"
+                "• 🇪🇹 <b>Ethiopia:</b> $ 3 (International cards only)\n\n"
                 "Ukishamaliza kulipa kwenye ukurasa wa malipo, fungua link ya activation ya bot utayopewa ili kuwezesha akaunti yako."
             )
             btn_back = "🔙 RUDI"
 
+        pay_rows = [
+            [
+                InlineKeyboardButton(
+                    f"{info['flag']} Pay {country} ({info['price_label']})",
+                    url=info["pay_url"]
+                )
+            ],
+            [
+                InlineKeyboardButton("🇹🇿 TSH 5,500", url=COUNTRY_CONFIG["Tanzania"]["pay_url"]),
+                InlineKeyboardButton("🇰🇪 KES 270", url=COUNTRY_CONFIG["Kenya"]["pay_url"])
+            ],
+            [
+                InlineKeyboardButton("🇺🇬 UGX 9,000", url=COUNTRY_CONFIG["Uganda"]["pay_url"]),
+                InlineKeyboardButton("🇬🇭 GHS 25", url=COUNTRY_CONFIG["Ghana"]["pay_url"])
+            ],
+            [
+                InlineKeyboardButton("🇳🇬 NGN 3,000", url=COUNTRY_CONFIG["Nigeria"]["pay_url"]),
+                InlineKeyboardButton("🇿🇼 $ 3 (Intl)", url=COUNTRY_CONFIG["Zimbabwe"]["pay_url"])
+            ],
+            [InlineKeyboardButton("🇪🇹 Ethiopia — $ 3 (International Cards Only)", url=COUNTRY_CONFIG["Ethiopia"]["pay_url"])],
+            [InlineKeyboardButton(btn_back, callback_data="back_to_error")]
+        ]
+
         await safe_edit_text(
             query.message,
             text,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🇹🇿 Tanzania — TZS 4,500", url=PAY_LINK_TZ)],
-                [InlineKeyboardButton("🇰🇪 Kenya — KSH 230", url=PAY_LINK_KE)],
-                [InlineKeyboardButton("🇺🇬 Uganda — UGX 7,500", url=PAY_LINK_UG)],
-                [InlineKeyboardButton("💳 International Card — USD $3", url=PAY_LINK_INTL)],
-                [InlineKeyboardButton(btn_back, callback_data="back_to_error")]
-            ])
+            reply_markup=InlineKeyboardMarkup(pay_rows)
         )
         return
 
     if data == "back_to_error":
         await safe_edit_text(
             query.message,
-            get_error_403_text(lang),
+            get_error_403_text(lang, country),
             reply_markup=get_error_403_keyboard(lang)
         )
         return
@@ -1238,13 +1359,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- BROADCAST FORMATTING & MULTI-BUTTON PARSER ---
 def parse_broadcast_text_and_buttons(raw_text):
-    """
-    Supports:
-    - Full Telegram HTML tags in message text (<b>, <i>, <u>, <s>, <code>, <pre>, <tg-spoiler>, <blockquote>, <a href="...">)
-    - Multiple inline buttons at the end of the text:
-        * One button per line: `Button Label | https://example.com`
-        * Multiple buttons on the same row separated by `||`: `Btn 1 | https://a.com || Btn 2 | https://b.com`
-    """
     if not raw_text:
         return "", None
 
@@ -1293,9 +1407,13 @@ def get_admin_home_text_and_kb():
     text = (
         "👑 <b>Tanzania Connection - Master Admin Panel</b>\n\n"
         f"👥 Total Users: <code>{total_users}</code>\n"
-        f"🇹🇿 Tanzania: <code>{c_counts['Tanzania']}</code> | "
-        f"🇰🇪 Kenya: <code>{c_counts['Kenya']}</code> | "
-        f"🇺🇬 Uganda: <code>{c_counts['Uganda']}</code>\n"
+        f"🇹🇿 TZ: <code>{c_counts['Tanzania']}</code> | "
+        f"🇰🇪 KE: <code>{c_counts['Kenya']}</code> | "
+        f"🇺🇬 UG: <code>{c_counts['Uganda']}</code>\n"
+        f"🇬🇭 GH: <code>{c_counts['Ghana']}</code> | "
+        f"🇳🇬 NG: <code>{c_counts['Nigeria']}</code>\n"
+        f"🇿🇼 ZW: <code>{c_counts['Zimbabwe']}</code> | "
+        f"🇪🇹 ET: <code>{c_counts['Ethiopia']}</code>\n"
         f"🌐 Unset: <code>{c_counts['Unset']}</code>\n\n"
         "Chagua huduma unayotaka kusimamia hapa chini:"
     )
@@ -1382,6 +1500,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
             f"🇹🇿 Tanzania: <code>{c_counts['Tanzania']}</code>\n"
             f"🇰🇪 Kenya: <code>{c_counts['Kenya']}</code>\n"
             f"🇺🇬 Uganda: <code>{c_counts['Uganda']}</code>\n"
+            f"🇬🇭 Ghana: <code>{c_counts['Ghana']}</code>\n"
+            f"🇳🇬 Nigeria: <code>{c_counts['Nigeria']}</code>\n"
+            f"🇿🇼 Zimbabwe: <code>{c_counts['Zimbabwe']}</code>\n"
+            f"🇪🇹 Ethiopia: <code>{c_counts['Ethiopia']}</code>\n"
             f"🌐 Unset: <code>{c_counts['Unset']}</code>\n"
             "🚀 Status: <b>Online & Stable 24/7</b>",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
@@ -1397,9 +1519,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
             query.message,
             "👥 <b>WATUMIAJI KWA NCHI</b>\n\n"
             f"📈 Jumla Kuu: <code>{total_users}</code>\n"
-            f"🇹🇿 Tanzania: <code>{c_counts['Tanzania']}</code>\n"
-            f"🇰🇪 Kenya: <code>{c_counts['Kenya']}</code>\n"
-            f"🇺🇬 Uganda: <code>{c_counts['Uganda']}</code>\n"
+            f"🇹🇿 TZ: <code>{c_counts['Tanzania']}</code> | "
+            f"🇰🇪 KE: <code>{c_counts['Kenya']}</code> | "
+            f"🇺🇬 UG: <code>{c_counts['Uganda']}</code>\n"
+            f"🇬🇭 GH: <code>{c_counts['Ghana']}</code> | "
+            f"🇳🇬 NG: <code>{c_counts['Nigeria']}</code>\n"
+            f"🇿🇼 ZW: <code>{c_counts['Zimbabwe']}</code> | "
+            f"🇪🇹 ET: <code>{c_counts['Ethiopia']}</code>\n"
             f"🌐 Unset: <code>{c_counts['Unset']}</code>\n"
             f"🆔 ID za mwisho 5: <code>{recent}</code>",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
@@ -1673,7 +1799,7 @@ async def background_automation_loop(main_app):
                     if uid not in notified_users:
                         notified_users.add(uid)
                         lang = get_user_language(uid)
-                        country = get_user_country(uid) or "Tanzania"
+                        country = get_user_country(uid) or DEFAULT_COUNTRY
                         return_msg = (
                             "⏳ <b>Old messages were cleared after 2 days.</b>\n\n"
                             "📍 Pick your region below to continue:"
