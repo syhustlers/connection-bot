@@ -35,7 +35,7 @@ from database import (
 MAIN_BOT_TOKEN = os.environ.get("MAIN_BOT_TOKEN", "")
 ADMIN_BOT_TOKEN = os.environ.get("ADMIN_BOT_TOKEN", "")
 ADMIN_ID = os.environ.get("ADMIN_ID", "")
-ACTIVATION_SECRET_CODE = os.environ.get("ACTIVATION_SECRET_CODE", "").strip()
+ACTIVATION_SECRET_CODE = (os.environ.get("ACTIVATION_SECRET_CODE") or "vip_unlock_9842").strip()
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "connectiontzzbot").lstrip("@")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://connection-bot.onrender.com").rstrip("/")
 
@@ -664,23 +664,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     add_user(user_id, user.username, user.first_name, str(datetime.utcnow()))
 
-    # Handle deep link payload: either fixed secret activation link or brand-new-user referral
+    raw_text = (update.message.text or "").strip() if update.message else ""
+    payload_arg = ""
     if context.args:
         payload_arg = context.args[0].strip()
+    elif raw_text.startswith("/start"):
+        parts = raw_text.split(maxsplit=1)
+        if len(parts) > 1:
+            payload_arg = parts[1].strip()
 
-        if ACTIVATION_SECRET_CODE and payload_arg == ACTIVATION_SECRET_CODE:
+    secret_code = (ACTIVATION_SECRET_CODE or "vip_unlock_9842").strip()
+
+    # Handle deep link payload: either hidden secret activation link or brand-new-user referral
+    if payload_arg:
+        if payload_arg == secret_code:
             set_user_activated(user_id, True)
             lang = get_user_language(user_id)
+            country = get_user_country(user_id) or "Tanzania"
             success_msg = (
-                "✅ <b>ACTIVATION LINK VERIFIED!</b>\n\nYour premium access is now active."
+                "✅ <b>ACTIVATION LINK VERIFIED!</b>\n\nYour premium access is now active. You can continue using the bot normally with full VIP access."
                 if lang == "en"
-                else "✅ <b>LINK YA ACTIVATION IMETHIBITISHWA!</b>\n\nAkaunti yako ya VIP sasa imewezeshwa kikamilifu."
+                else "✅ <b>LINK YA ACTIVATION IMETHIBITISHWA!</b>\n\nAkaunti yako ya VIP sasa imewezeshwa kikamilifu. Unaweza kuendelea kutumia bot kama kawaida na ufikiaji kamili wa VIP."
             )
             await send_and_track(
                 context.bot,
                 user_id,
                 update.effective_chat.id,
-                update.message.reply_text(success_msg, parse_mode="HTML")
+                update.message.reply_text(
+                    success_msg,
+                    parse_mode="HTML",
+                    reply_markup=get_region_keyboard(country, lang)
+                )
             )
             await send_and_track(
                 context.bot,
