@@ -1839,6 +1839,11 @@ async def background_automation_loop(main_app):
             pass
 
 
+async def on_error(update, context):
+    # Without this, handler crashes are silent. Now they show up in the Render logs.
+    logger.error("Unhandled exception while handling an update", exc_info=context.error)
+
+
 # --- UNIFIED ASYNC MAIN RUNNER ---
 async def main():
     init_db()
@@ -1856,6 +1861,9 @@ async def main():
     main_app.add_handler(CallbackQueryHandler(age_callback, pattern="^age_"))
     main_app.add_handler(CallbackQueryHandler(handle_callback))
     main_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
+
+    main_app.add_error_handler(on_error)
+    admin_app.add_error_handler(on_error)
 
     # Admin Bot Handlers
     admin_app.add_handler(CommandHandler("start", admin_start))
