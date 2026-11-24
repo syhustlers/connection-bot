@@ -95,7 +95,7 @@ COUNTRY_CONFIG = {
     },
     "Ethiopia": {
         "flag": "🇪🇹",
-        "price_label": "ET",
+        "price_label": "ETH",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrgc952",
         "site_url": "https://www.exoticethiopia.com",
         "site_name": "Exotic Ethiopia",
@@ -1779,6 +1779,10 @@ def run_flask():
 
 
 # --- BACKGROUND LOOP: 2-DAY AUTO-DELETE + REGION KEYBOARD RETURN & WEEKLY BACKUP ---
+CLEANUP_NOTICE_COOLDOWN = 24 * 60 * 60   # at most one "old messages cleared" notice per user per day
+last_cleanup_notice = {}
+
+
 async def background_automation_loop(main_app):
     last_backup_key = None
     while True:
@@ -1796,8 +1800,9 @@ async def background_automation_loop(main_app):
                     await safe_delete_message(main_app.bot, chat_id, msg_id)
                     processed_ids.append(row_id)
 
-                    if uid not in notified_users:
+                    if uid not in notified_users and now_ts - last_cleanup_notice.get(uid, 0) >= CLEANUP_NOTICE_COOLDOWN:
                         notified_users.add(uid)
+                        last_cleanup_notice[uid] = now_ts
                         lang = get_user_language(uid)
                         country = get_user_country(uid) or DEFAULT_COUNTRY
                         return_msg = (
