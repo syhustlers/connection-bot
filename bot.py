@@ -14,6 +14,7 @@ from telegram import (
     ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton,
     InputMediaPhoto, InputMediaVideo
 )
+from telegram.error import Forbidden, BadRequest, RetryAfter
 from telegram.ext import (
     ApplicationBuilder, ContextTypes, CommandHandler,
     CallbackQueryHandler, MessageHandler, filters
@@ -28,6 +29,8 @@ from database import (
     get_order_details, is_user_activated,
     log_broadcast_click,
     track_user_message, get_expired_messages, delete_tracked_messages_by_ids,
+    get_broadcast_users, mark_user_blocked, get_blocked_count,
+    set_profile_file_id, get_profile_file_ids, get_extra_profile_keys, profile_unique_id_exists,
     DB_PATH
 )
 
@@ -35,6 +38,8 @@ from database import (
 MAIN_BOT_TOKEN = os.environ.get("MAIN_BOT_TOKEN", "")
 ADMIN_BOT_TOKEN = os.environ.get("ADMIN_BOT_TOKEN", "")
 ADMIN_ID = os.environ.get("ADMIN_ID", "")
+# Private channel where the bot keeps the profile pictures (main bot must be an admin there)
+PROFILE_CHANNEL_ID = int(os.environ.get("PROFILE_CHANNEL_ID") or "-1004399690789")
 DEFAULT_ACTIVATION_CODE = "vip_unlock_9842"
 ACTIVATION_SECRET_CODE = (os.environ.get("ACTIVATION_SECRET_CODE") or DEFAULT_ACTIVATION_CODE).strip()
 ACTIVATION_CODES = {code for code in (DEFAULT_ACTIVATION_CODE, ACTIVATION_SECRET_CODE) if code}
@@ -47,7 +52,7 @@ CPA_LINK = "https://tinyurl.com/Activebot"
 COUNTRY_CONFIG = {
     "Tanzania": {
         "flag": "🇹🇿",
-        "price_label": "TZ",
+        "price_label": "TSH 5,500",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwpyeqqj",
         "site_url": "https://www.exotictanzania.com",
         "site_name": "Exotic Tanzania",
@@ -55,7 +60,7 @@ COUNTRY_CONFIG = {
     },
     "Kenya": {
         "flag": "🇰🇪",
-        "price_label": "KE",
+        "price_label": "KES 270",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrg696v",
         "site_url": "https://www.exotickenya.com",
         "site_name": "Exotic Kenya",
@@ -63,7 +68,7 @@ COUNTRY_CONFIG = {
     },
     "Uganda": {
         "flag": "🇺🇬",
-        "price_label": "UGX",
+        "price_label": "UGX 9,000",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrgfhtt",
         "site_url": "https://www.exoticuganda.com",
         "site_name": "Exotic Uganda",
@@ -71,7 +76,7 @@ COUNTRY_CONFIG = {
     },
     "Ghana": {
         "flag": "🇬🇭",
-        "price_label": "GH",
+        "price_label": "GHS 25",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwro6u2b",
         "site_url": "https://www.exoticghana.com",
         "site_name": "Exotic Ghana",
@@ -79,7 +84,7 @@ COUNTRY_CONFIG = {
     },
     "Nigeria": {
         "flag": "🇳🇬",
-        "price_label": "NG",
+        "price_label": "NGN 3,000",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwro3lcp",
         "site_url": "https://www.exoticnigeria.com",
         "site_name": "Exotic Nigeria",
@@ -87,7 +92,7 @@ COUNTRY_CONFIG = {
     },
     "Zimbabwe": {
         "flag": "🇿🇼",
-        "price_label": "ZIM",
+        "price_label": "$ 3",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrgc952",
         "site_url": "https://www.exoticzimbabwe.com",
         "site_name": "Exotic Zimbabwe",
@@ -95,7 +100,7 @@ COUNTRY_CONFIG = {
     },
     "Ethiopia": {
         "flag": "🇪🇹",
-        "price_label": "ETH",
+        "price_label": "$ 3",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrgc952",
         "site_url": "https://www.exoticethiopia.com",
         "site_name": "Exotic Ethiopia",
@@ -968,14 +973,16 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if hide_kb:
             await safe_delete_message(context.bot, hide_kb.chat_id, hide_kb.message_id)
 
+        profile_ids = get_profile_file_ids()
+        all_keys = list(dict.fromkeys(list(IMAGES) + get_extra_profile_keys()))
         seen = get_seen_images(user_id)
-        available_images = [img for img in IMAGES if img not in seen]
+        available_images = [img for img in all_keys if img not in seen]
         if not available_images:
             reset_seen_images(user_id)
-            available_images = IMAGES
+            available_images = all_keys
 
-        image_url = random.choice(available_images)
-        add_seen_image(user_id, image_url)
+        image_key = random.choice(available_images)
+        add_seen_image(user_id, image_key)
 
         name = random.choice(NAMES)
         age = random.randint(18, 25)
@@ -1018,8 +1025,10 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             context.bot,
             user_id,
             update.effective_chat.id,
-            update.message.reply_photo(
-                photo=image_url,
+            reply_profile_photo(
+                update.message,
+                image_key,
+                profile_ids.get(image_key),
                 caption=caption,
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
@@ -1527,6 +1536,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
             f"🇿🇼 ZW: <code>{c_counts['Zimbabwe']}</code> | "
             f"🇪🇹 ET: <code>{c_counts['Ethiopia']}</code>\n"
             f"🌐 Unset: <code>{c_counts['Unset']}</code>\n"
+            f"🚫 Wamezuia bot: <code>{get_blocked_count()}</code>\n"
             f"🆔 ID za mwisho 5: <code>{recent}</code>",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
@@ -1621,63 +1631,88 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
             )
             return
 
-        users = get_all_users()
+        users = get_broadcast_users()
         success = 0
         failed = 0
+        newly_blocked = 0
         status_msg = await safe_edit_text(query.message, f"🚀 Inatuma broadcast kwa watumiaji {len(users)}...")
+
+        async def deliver(uid):
+            # First send uploads the file; every later send reuses Telegram's file_id (no upload).
+            if len(items) > 1:
+                media_group = []
+                for idx, item in enumerate(items):
+                    cap = clean_text if idx == 0 and clean_text else None
+                    ref = item.get("file_id") or item["bytes"]
+                    if item["type"] == "photo":
+                        media_group.append(InputMediaPhoto(media=ref, caption=cap, parse_mode="HTML" if cap else None))
+                    else:
+                        media_group.append(InputMediaVideo(media=ref, caption=cap, parse_mode="HTML" if cap else None))
+                sent = await main_app.bot.send_media_group(chat_id=uid, media=media_group)
+                for item, sent_msg in zip(items, sent):
+                    _cache_media_file_id(item, sent_msg)
+                if markup:
+                    await main_app.bot.send_message(
+                        chat_id=uid,
+                        text="👇" if not clean_text else "🔗",
+                        reply_markup=markup
+                    )
+            elif len(items) == 1:
+                item = items[0]
+                ref = item.get("file_id") or item["bytes"]
+                if item["type"] == "photo":
+                    sent_msg = await main_app.bot.send_photo(
+                        chat_id=uid,
+                        photo=ref,
+                        caption=clean_text or None,
+                        parse_mode="HTML" if clean_text else None,
+                        reply_markup=markup
+                    )
+                else:
+                    sent_msg = await main_app.bot.send_video(
+                        chat_id=uid,
+                        video=ref,
+                        caption=clean_text or None,
+                        parse_mode="HTML" if clean_text else None,
+                        reply_markup=markup
+                    )
+                _cache_media_file_id(item, sent_msg)
+            else:
+                await main_app.bot.send_message(
+                    chat_id=uid,
+                    text=clean_text,
+                    parse_mode="HTML",
+                    reply_markup=markup
+                )
 
         for uid in users:
             try:
-                if len(items) > 1:
-                    media_group = []
-                    for idx, item in enumerate(items):
-                        cap = clean_text if idx == 0 and clean_text else None
-                        if item["type"] == "photo":
-                            media_group.append(InputMediaPhoto(media=item["bytes"], caption=cap, parse_mode="HTML" if cap else None))
-                        else:
-                            media_group.append(InputMediaVideo(media=item["bytes"], caption=cap, parse_mode="HTML" if cap else None))
-                    await main_app.bot.send_media_group(chat_id=uid, media=media_group)
-                    if markup:
-                        await main_app.bot.send_message(
-                            chat_id=uid,
-                            text="👇" if not clean_text else "🔗",
-                            reply_markup=markup
-                        )
-                elif len(items) == 1:
-                    item = items[0]
-                    if item["type"] == "photo":
-                        await main_app.bot.send_photo(
-                            chat_id=uid,
-                            photo=item["bytes"],
-                            caption=clean_text or None,
-                            parse_mode="HTML" if clean_text else None,
-                            reply_markup=markup
-                        )
-                    else:
-                        await main_app.bot.send_video(
-                            chat_id=uid,
-                            video=item["bytes"],
-                            caption=clean_text or None,
-                            parse_mode="HTML" if clean_text else None,
-                            reply_markup=markup
-                        )
-                else:
-                    await main_app.bot.send_message(
-                        chat_id=uid,
-                        text=clean_text,
-                        parse_mode="HTML",
-                        reply_markup=markup
-                    )
+                try:
+                    await deliver(uid)
+                except RetryAfter as e:
+                    await asyncio.sleep(_retry_seconds(e) + 1)
+                    await deliver(uid)
                 success += 1
-                await asyncio.sleep(0.05)
+            except Forbidden:
+                # bot blocked / user deactivated: stop sending to this user in future broadcasts
+                failed += 1
+                mark_user_blocked(uid)
+                newly_blocked += 1
+            except BadRequest as e:
+                failed += 1
+                if "chat not found" in str(e).lower():
+                    mark_user_blocked(uid)
+                    newly_blocked += 1
             except Exception:
                 failed += 1
+            await asyncio.sleep(0.05)
 
         admin_broadcast_drafts[admin_uid] = {"items": [], "text": ""}
         done_text = (
             "✅ <b>BROADCAST IMEKAMILIKA!</b>\n\n"
             f"📤 Imefanikiwa: <code>{success}</code>\n"
-            f"❌ Imeshindikana: <code>{failed}</code>"
+            f"❌ Imeshindikana: <code>{failed}</code>\n"
+            f"🚫 Wamezuia bot (hawatatumiwa tena): <code>{newly_blocked}</code>"
         )
         done_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KWENYE MENYU", callback_data="admin_home")]])
         if status_msg:
@@ -1844,6 +1879,107 @@ async def background_automation_loop(main_app):
             pass
 
 
+async def reply_profile_photo(message, image_key, file_id, **kwargs):
+    """Send the picture from Telegram's own storage (file_id); fall back to the old link."""
+    try:
+        return await message.reply_photo(photo=file_id or image_key, **kwargs)
+    except Exception:
+        if file_id and str(image_key).startswith("http"):
+            return await message.reply_photo(photo=image_key, **kwargs)
+        raise
+
+
+def _retry_seconds(err):
+    value = getattr(err, "retry_after", 5)
+    try:
+        return float(value.total_seconds())
+    except AttributeError:
+        return float(value)
+
+
+async def sync_profile_media(main_app, admin_app=None):
+    """One-time (resumable): post each IMAGES link into the private channel and remember its file_id."""
+    if not PROFILE_CHANNEL_ID:
+        return
+    stored = get_profile_file_ids()
+    todo = [u for u in dict.fromkeys(IMAGES) if u not in stored]
+    if not todo:
+        logger.info("Profile channel sync: all %d pictures already stored.", len(stored))
+        return
+
+    logger.info("Profile channel sync: posting %d pictures to the channel...", len(todo))
+    done, failed, consecutive_fail, aborted = 0, [], 0, False
+    for url in todo:
+        ok = False
+        for _attempt in range(2):
+            try:
+                msg = await main_app.bot.send_photo(chat_id=PROFILE_CHANNEL_ID, photo=url)
+                photo = msg.photo[-1]
+                set_profile_file_id(url, photo.file_id, photo.file_unique_id)
+                ok = True
+                break
+            except RetryAfter as e:
+                await asyncio.sleep(_retry_seconds(e) + 1)
+            except Exception as e:
+                logger.warning("Profile sync failed for %s: %s", url, e)
+                break
+        if ok:
+            done += 1
+            consecutive_fail = 0
+        else:
+            failed.append(url)
+            consecutive_fail += 1
+            if consecutive_fail >= 3:
+                aborted = True
+                break
+        await asyncio.sleep(3.5)
+
+    if aborted:
+        text = (
+            "❌ <b>Imeshindikana kuweka picha kwenye channel.</b>\n"
+            f"Hakikisha main bot ni admin kwenye channel (<code>{PROFILE_CHANNEL_ID}</code>) na ana ruhusa ya kutuma ujumbe."
+        )
+    else:
+        text = (
+            "✅ <b>Picha za profile zimewekwa kwenye channel.</b>\n"
+            f"📤 Zimefanikiwa: <code>{done}</code>\n"
+            f"❌ Zimeshindikana: <code>{len(failed)}</code>"
+        )
+    logger.info("Profile channel sync finished: done=%d failed=%d aborted=%s", done, len(failed), aborted)
+    if ADMIN_ID:
+        for app_ in (admin_app, main_app):
+            if app_ is None:
+                continue
+            try:
+                await app_.bot.send_message(chat_id=int(ADMIN_ID), text=text, parse_mode="HTML")
+                break
+            except Exception:
+                continue
+
+
+async def profile_channel_post(update, context):
+    """A photo posted in the private channel becomes a new profile picture automatically."""
+    post = update.channel_post
+    if not post or not post.photo:
+        return
+    photo = post.photo[-1]
+    if profile_unique_id_exists(photo.file_unique_id):
+        return
+    set_profile_file_id(f"tg:{photo.file_unique_id}", photo.file_id, photo.file_unique_id, extra=True)
+    logger.info("New profile picture added from channel: tg:%s", photo.file_unique_id)
+
+
+def _cache_media_file_id(item, message):
+    """After the first successful send, remember Telegram's file_id so we never upload again."""
+    try:
+        if item["type"] == "photo" and message.photo:
+            item["file_id"] = message.photo[-1].file_id
+        elif item["type"] == "video" and message.video:
+            item["file_id"] = message.video.file_id
+    except Exception:
+        pass
+
+
 async def on_error(update, context):
     # Without this, handler crashes are silent. Now they show up in the Render logs.
     logger.error("Unhandled exception while handling an update", exc_info=context.error)
@@ -1865,7 +2001,12 @@ async def main():
     main_app.add_handler(CommandHandler("language", cmd_language))
     main_app.add_handler(CallbackQueryHandler(age_callback, pattern="^age_"))
     main_app.add_handler(CallbackQueryHandler(handle_callback))
-    main_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
+    main_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.UpdateType.MESSAGE, text_message_handler))
+    if PROFILE_CHANNEL_ID:
+        main_app.add_handler(MessageHandler(
+            filters.UpdateType.CHANNEL_POST & filters.Chat(chat_id=PROFILE_CHANNEL_ID) & filters.PHOTO,
+            profile_channel_post
+        ))
 
     main_app.add_error_handler(on_error)
     admin_app.add_error_handler(on_error)
@@ -1884,6 +2025,7 @@ async def main():
     await admin_app.updater.start_polling()
 
     asyncio.create_task(background_automation_loop(main_app))
+    asyncio.create_task(sync_profile_media(main_app, admin_app))
 
     logger.info("Main Bot & Master Admin Panel running successfully.")
 
