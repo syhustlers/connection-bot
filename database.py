@@ -57,6 +57,8 @@ def init_db():
             c.execute("ALTER TABLE users ADD COLUMN language TEXT DEFAULT 'sw'")
         if "country" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN country TEXT")
+        if "blocked" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0")
         if "joined_at" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN joined_at TEXT")
             if "joined_date" in cols:
@@ -74,6 +76,14 @@ def init_db():
                 user_id TEXT,
                 image_url TEXT,
                 PRIMARY KEY (user_id, image_url)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS profile_media (
+                image_key TEXT PRIMARY KEY,
+                file_id TEXT NOT NULL,
+                unique_id TEXT,
+                extra INTEGER DEFAULT 0
             )
         """)
         c.execute("""
@@ -128,7 +138,8 @@ def add_user(user_id, username, first_name, joined_at):
             VALUES (?, ?, ?, ?, 'sw', 0)
             ON CONFLICT(user_id) DO UPDATE SET
                 username = COALESCE(excluded.username, users.username),
-                first_name = COALESCE(excluded.first_name, users.first_name)
+                first_name = COALESCE(excluded.first_name, users.first_name),
+                blocked = 0
             """,
             (uid, username, first_name, joined_at)
         )
@@ -241,6 +252,59 @@ def get_all_users():
         return [r[0] for r in rows if r and r[0]]
 
 
+def get_broadcast_users():
+    """Users who have NOT blocked the bot."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT user_id FROM users WHERE COALESCE(blocked, 0) = 0").fetchall()
+        return [r[0] for r in rows if r and r[0]]
+
+
+def mark_user_blocked(user_id):
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET blocked = 1 WHERE user_id = ?", (str(user_id),))
+        conn.commit()
+
+
+def get_blocked_count():
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) FROM users WHERE COALESCE(blocked, 0) = 1").fetchone()
+        return int(row[0] or 0) if row else 0
+
+
+def set_profile_file_id(image_key, file_id, unique_id=None, extra=False):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO profile_media (image_key, file_id, unique_id, extra)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(image_key) DO UPDATE SET
+                file_id = excluded.file_id,
+                unique_id = excluded.unique_id
+            """,
+            (image_key, file_id, unique_id, 1 if extra else 0)
+        )
+        conn.commit()
+
+
+def get_profile_file_ids():
+    with get_conn() as conn:
+        rows = conn.execute("SELECT image_key, file_id FROM profile_media").fetchall()
+        return {r[0]: r[1] for r in rows}
+
+
+def get_extra_profile_keys():
+    """Pictures added by posting in the channel (not part of the IMAGES list)."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT image_key FROM profile_media WHERE extra = 1 ORDER BY rowid").fetchall()
+        return [r[0] for r in rows]
+
+
+def profile_unique_id_exists(unique_id):
+    with get_conn() as conn:
+        row = conn.execute("SELECT 1 FROM profile_media WHERE unique_id = ?", (unique_id,)).fetchone()
+        return row is not None
+
+
 def get_total_users_count():
     with get_conn() as conn:
         row = conn.execute("SELECT COUNT(*) FROM users").fetchone()
@@ -328,3 +392,4 @@ def delete_tracked_messages_by_ids(row_ids):
     with get_conn() as conn:
         conn.execute(f"DELETE FROM tracked_messages WHERE id IN ({placeholders})", list(row_ids))
         conn.commit()
+        
