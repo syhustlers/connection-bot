@@ -56,7 +56,7 @@ CPA_LINK = "https://tinyurl.com/Activebot"
 COUNTRY_CONFIG = {
     "Tanzania": {
         "flag": "🇹🇿",
-        "price_label": "TSH 5,500",
+        "price_label": "TZ",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwpyeqqj",
         "site_url": "https://www.exotictanzania.com",
         "site_name": "Exotic Tanzania",
@@ -64,7 +64,7 @@ COUNTRY_CONFIG = {
     },
     "Kenya": {
         "flag": "🇰🇪",
-        "price_label": "KES 270",
+        "price_label": "KE",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrg696v",
         "site_url": "https://www.exotickenya.com",
         "site_name": "Exotic Kenya",
@@ -72,7 +72,7 @@ COUNTRY_CONFIG = {
     },
     "Uganda": {
         "flag": "🇺🇬",
-        "price_label": "UGX 9,000",
+        "price_label": "UG",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrgfhtt",
         "site_url": "https://www.exoticuganda.com",
         "site_name": "Exotic Uganda",
@@ -80,7 +80,7 @@ COUNTRY_CONFIG = {
     },
     "Ghana": {
         "flag": "🇬🇭",
-        "price_label": "GHS 25",
+        "price_label": "GH",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwro6u2b",
         "site_url": "https://www.exoticghana.com",
         "site_name": "Exotic Ghana",
@@ -88,7 +88,7 @@ COUNTRY_CONFIG = {
     },
     "Nigeria": {
         "flag": "🇳🇬",
-        "price_label": "NGN 3,000",
+        "price_label": "NG",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwro3lcp",
         "site_url": "https://www.exoticnigeria.com",
         "site_name": "Exotic Nigeria",
@@ -96,7 +96,7 @@ COUNTRY_CONFIG = {
     },
     "Zimbabwe": {
         "flag": "🇿🇼",
-        "price_label": "$ 3",
+        "price_label": "ZIM",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrgc952",
         "site_url": "https://www.exoticzimbabwe.com",
         "site_name": "Exotic Zimbabwe",
@@ -104,7 +104,7 @@ COUNTRY_CONFIG = {
     },
     "Ethiopia": {
         "flag": "🇪🇹",
-        "price_label": "$ 3",
+        "price_label": "ETH",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrgc952",
         "site_url": "https://www.exoticethiopia.com",
         "site_name": "Exotic Ethiopia",
