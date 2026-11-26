@@ -4,6 +4,8 @@ import time
 import random
 import asyncio
 import logging
+import copy
+from html import escape as html_escape, unescape as html_unescape
 from datetime import datetime
 from urllib.parse import quote
 from threading import Thread
@@ -26,8 +28,10 @@ from database import (
     add_referral_new_user_only, get_referral_count, get_all_users,
     get_total_users_count, get_users_by_country_counts,
     get_seen_images, add_seen_image, reset_seen_images,
-    get_order_details, is_user_activated,
-    log_broadcast_click,
+    is_user_activated,
+    log_broadcast_click, create_broadcast, finish_broadcast,
+    get_recent_broadcasts, get_broadcast_click_detail, get_untracked_click_total,
+    set_user_requested_country, get_top_requested_countries, get_requested_countries_total,
     track_user_message, get_expired_messages, delete_tracked_messages_by_ids,
     get_broadcast_users, mark_user_blocked, get_blocked_count,
     set_profile_file_id, get_profile_file_ids, get_extra_profile_keys, profile_unique_id_exists,
@@ -52,7 +56,7 @@ CPA_LINK = "https://tinyurl.com/Activebot"
 COUNTRY_CONFIG = {
     "Tanzania": {
         "flag": "🇹🇿",
-        "price_label": "TS",
+        "price_label": "TSH 5,500",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwpyeqqj",
         "site_url": "https://www.exotictanzania.com",
         "site_name": "Exotic Tanzania",
@@ -60,7 +64,7 @@ COUNTRY_CONFIG = {
     },
     "Kenya": {
         "flag": "🇰🇪",
-        "price_label": "KE",
+        "price_label": "KES 270",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrg696v",
         "site_url": "https://www.exotickenya.com",
         "site_name": "Exotic Kenya",
@@ -68,7 +72,7 @@ COUNTRY_CONFIG = {
     },
     "Uganda": {
         "flag": "🇺🇬",
-        "price_label": "UG",
+        "price_label": "UGX 9,000",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrgfhtt",
         "site_url": "https://www.exoticuganda.com",
         "site_name": "Exotic Uganda",
@@ -76,7 +80,7 @@ COUNTRY_CONFIG = {
     },
     "Ghana": {
         "flag": "🇬🇭",
-        "price_label": "GH",
+        "price_label": "GHS 25",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwro6u2b",
         "site_url": "https://www.exoticghana.com",
         "site_name": "Exotic Ghana",
@@ -84,7 +88,7 @@ COUNTRY_CONFIG = {
     },
     "Nigeria": {
         "flag": "🇳🇬",
-        "price_label": "NGN",
+        "price_label": "NGN 3,000",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwro3lcp",
         "site_url": "https://www.exoticnigeria.com",
         "site_name": "Exotic Nigeria",
@@ -92,7 +96,7 @@ COUNTRY_CONFIG = {
     },
     "Zimbabwe": {
         "flag": "🇿🇼",
-        "price_label": "ZIM",
+        "price_label": "$ 3",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrgc952",
         "site_url": "https://www.exoticzimbabwe.com",
         "site_name": "Exotic Zimbabwe",
@@ -100,7 +104,7 @@ COUNTRY_CONFIG = {
     },
     "Ethiopia": {
         "flag": "🇪🇹",
-        "price_label": "ET",
+        "price_label": "$ 3",
         "pay_url": "https://host.stanymaxhub.online/pay/connection-bot-subscription-mwrgc952",
         "site_url": "https://www.exoticethiopia.com",
         "site_name": "Exotic Ethiopia",
@@ -122,11 +126,17 @@ user_cooldowns = {}
 active_step_prompts = {}  # {user_id: {"chat_id": int, "message_id": int}}
 
 # Admin pending input modes
-ADMIN_MODE_ORDER = "order"
 ADMIN_MODE_BROADCAST = "broadcast"
+ADMIN_MODE_BTN_LABEL = "btn_label"
+ADMIN_MODE_BTN_URL = "btn_url"
+ADMIN_MODE_BTN_EDIT_LABEL = "btn_edit_label"
+ADMIN_MODE_BTN_EDIT_URL = "btn_edit_url"
 
 # Pending multi-media broadcast drafts per admin user: {admin_id: {"items": [...], "text": ""}}
 admin_broadcast_drafts = {}
+
+# Live state of the broadcast that is currently being sent (only one at a time)
+broadcast_state = {"running": False, "stop": False, "id": None, "sent": 0, "failed": 0, "blocked": 0, "total": 0, "task": None, "panel": None}
 
 
 def get_country_info(country):
@@ -642,7 +652,8 @@ def get_country_keyboard():
         [
             InlineKeyboardButton("🇿🇼 Zimbabwe", callback_data="set_country_Zimbabwe"),
             InlineKeyboardButton("🇪🇹 Ethiopia", callback_data="set_country_Ethiopia")
-        ]
+        ],
+        [InlineKeyboardButton("🌍 Other country / Nchi nyingine", callback_data="other_country")]
     ])
 
 
@@ -666,6 +677,53 @@ async def check_membership(bot, user_id):
 
 
 # --- ONBOARDING & PREFERENCE PROMPTS ---
+def normalize_country_input(text):
+    """Clean a typed country name. Returns None if it does not look like a country name."""
+    value = re.sub(r"\s+", " ", (text or "").strip())
+    if not (2 <= len(value) <= 40):
+        return None
+    if not re.fullmatch(r"[^\W\d_]+(?:[ '\-.][^\W\d_]+)*\.?", value, re.UNICODE):
+        return None
+    return value.title()
+
+
+async def handle_other_country_text(update, context, user_id, lang, text):
+    """User chose 'Other country' and typed a name. Returns True if the message was consumed."""
+    if text in SWITCH_KB_LABELS or text in ALL_REGIONS or text.startswith("/"):
+        context.user_data.pop("awaiting_other_country", None)
+        return False
+
+    name = normalize_country_input(text)
+    if not name:
+        await update.message.reply_text(
+            "⚠️ Please type just your country name (letters only), e.g. <i>Rwanda</i>." if lang == "en"
+            else "⚠️ Tafadhali andika jina la nchi yako tu (herufi tu), mfano <i>Rwanda</i>.",
+            parse_mode="HTML"
+        )
+        return True
+
+    context.user_data.pop("awaiting_other_country", None)
+    supported = next((c for c in REGIONS_BY_COUNTRY if c.lower() == name.lower()), None)
+    if supported:
+        # they typed a country we already support -> treat it like a normal pick
+        set_user_country(user_id, supported)
+        await clear_step_prompt(context.bot, user_id)
+        await send_language_prompt(update.message, user_id, lang, replace_current=False)
+        return True
+
+    set_user_requested_country(user_id, name)
+    await clear_step_prompt(context.bot, user_id)
+    await update.message.reply_text(
+        f"✅ Thanks! We noted <b>{html_escape(name)}</b> and we are working on adding more countries.\n\n"
+        "You can keep using the bot as normal 👇" if lang == "en"
+        else f"✅ Asante! Tumeandika <b>{html_escape(name)}</b> na tunafanya kazi kuongeza nchi zaidi.\n\n"
+        "Unaweza kuendelea kutumia bot kama kawaida 👇",
+        parse_mode="HTML"
+    )
+    await send_language_prompt(update.message, user_id, lang, replace_current=False)
+    return True
+
+
 async def send_country_prompt(target_message, user_id, lang, replace_current=False):
     if lang == "en":
         text = (
@@ -928,6 +986,10 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     saved_country = get_user_country(user_id)
     text = (update.message.text or "").strip()
 
+    if context.user_data.get("awaiting_other_country"):
+        if await handle_other_country_text(update, context, user_id, lang, text):
+            return
+
     if text in SWITCH_KB_LABELS:
         await run_paced_loader(
             update.message,
@@ -1092,6 +1154,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             delete_after=True
         )
         await send_country_prompt(query.message, user_id, lang, replace_current=False)
+        return
+
+    if data != "other_country":
+        context.user_data.pop("awaiting_other_country", None)
+
+    if data == "other_country":
+        context.user_data["awaiting_other_country"] = True
+        await clear_step_prompt(context.bot, user_id, current_message=query.message)
+        sent = await query.message.reply_text(
+            "🌍 <b>OTHER COUNTRY</b>\n\nType the name of your country (for example: <i>Rwanda</i>) 👇" if lang == "en"
+            else "🌍 <b>NCHI NYINGINE</b>\n\nAndika jina la nchi yako (mfano: <i>Rwanda</i>) 👇",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                "🔙 Back" if lang == "en" else "🔙 Rudi", callback_data="pick_country")]])
+        )
+        if sent:
+            await register_step_prompt(context.bot, user_id, sent.chat_id, sent.message_id)
         return
 
     if data == "pick_country":
@@ -1367,47 +1446,149 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # --- BROADCAST FORMATTING & MULTI-BUTTON PARSER ---
-def parse_broadcast_text_and_buttons(raw_text):
-    if not raw_text:
-        return "", None
+# =====================================================================
+#  BROADCAST STUDIO - text, buttons and live preview helpers
+# =====================================================================
+MAX_BUTTONS_TOTAL = 50
+MAX_BUTTONS_PER_ROW = 8
+MAX_MEDIA_ITEMS = 10
+_PLAIN_ENTITY_TYPES = {"url", "mention", "hashtag", "cashtag", "bot_command", "email", "phone_number"}
+_HTML_TAG_RE = re.compile(
+    r"</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|a|blockquote|tg-spoiler|tg-emoji|span)(?:\s[^>]*)?>",
+    re.IGNORECASE
+)
 
-    lines = raw_text.split("\n")
-    body_lines = []
-    url_pattern = re.compile(r"^https?://", re.IGNORECASE)
 
-    trailing_mode = True
-    reversed_button_rows = []
+def strip_tags(value):
+    return html_unescape(re.sub(r"<[^>]+>", "", value or "")).strip()
 
+
+def message_to_html(msg):
+    """Turn what the admin typed in Telegram (bold, italic, `monospace`, links...) into HTML.
+    Plain text is escaped; text that already contains hand-typed HTML tags keeps working as before."""
+    if msg.text is not None:
+        raw, ents, formatted = msg.text, (msg.entities or []), msg.text_html
+    else:
+        raw, ents, formatted = (msg.caption or ""), (msg.caption_entities or []), msg.caption_html
+    if not raw:
+        return ""
+    if any(getattr(e, "type", None) not in _PLAIN_ENTITY_TYPES for e in ents):
+        return formatted
+    if _HTML_TAG_RE.search(raw):
+        return raw
+    return html_escape(raw, quote=False)
+
+
+def extract_button_rows(text):
+    """Quick syntax (still supported): trailing lines `Label | https://link`, use `||` for 2+ buttons in a row."""
+    if not text:
+        return "", []
+    lines = text.split("\n")
+    body, rows_rev = [], []
+    url_pattern = re.compile(r"^https?://\S+$", re.IGNORECASE)
+    trailing = True
     for line in reversed(lines):
         stripped = line.strip()
-        if trailing_mode and stripped and "|" in stripped:
-            segments = [seg.strip() for seg in stripped.split("||")]
-            row_buttons = []
-            valid_row = True
-            for seg in segments:
+        if trailing and stripped and "|" in stripped:
+            row, valid = [], True
+            for seg in stripped.split("||"):
                 if "|" not in seg:
-                    valid_row = False
+                    valid = False
                     break
                 label, target = seg.split("|", 1)
-                label = label.strip()
-                target = target.strip()
+                label, target = strip_tags(label), strip_tags(target)
                 if not label or not url_pattern.match(target):
-                    valid_row = False
+                    valid = False
                     break
-                tracked_url = f"{RENDER_EXTERNAL_URL}/click?url={quote(target, safe='')}"
-                row_buttons.append(InlineKeyboardButton(label, url=tracked_url))
-            if valid_row and row_buttons:
-                reversed_button_rows.append(row_buttons)
+                row.append({"text": label[:64], "url": target})
+            if valid and row:
+                rows_rev.append(row)
                 continue
-        trailing_mode = False
-        body_lines.append(line)
+        trailing = False
+        body.append(line)
+    body.reverse()
+    rows_rev.reverse()
+    return "\n".join(body).strip(), rows_rev
 
-    body_lines.reverse()
-    reversed_button_rows.reverse()
 
-    clean_text = "\n".join(body_lines).strip()
-    markup = InlineKeyboardMarkup(reversed_button_rows) if reversed_button_rows else None
-    return clean_text, markup
+def normalize_button_url(raw):
+    value = (raw or "").strip()
+    if value and not re.match(r"^https?://", value, re.IGNORECASE) and re.match(r"^[\w.-]+\.[a-zA-Z]{2,}(/\S*)?$", value):
+        value = "https://" + value
+    if re.match(r"^https?://\S+$", value, re.IGNORECASE) and "." in value:
+        return value
+    return None
+
+
+def flat_buttons(rows):
+    return [btn for row in rows for btn in row]
+
+
+def locate_button(rows, flat_index):
+    n = 0
+    for r, row in enumerate(rows):
+        for c, _btn in enumerate(row):
+            if n == flat_index:
+                return r, c
+            n += 1
+    return None
+
+
+def rows_from_flat(flat, per_row):
+    return [flat[i:i + per_row] for i in range(0, len(flat), per_row)]
+
+
+def add_button_to_draft(draft, label, url, same_row):
+    btn = {"text": label, "url": url}
+    rows = draft["buttons"]
+    if same_row and rows and len(rows[-1]) < MAX_BUTTONS_PER_ROW:
+        rows[-1].append(btn)
+    else:
+        rows.append([btn])
+
+
+def build_markup(rows, track=None):
+    """Inline keyboard. track=(broadcast_id, user_id) wraps links so clicks are counted per broadcast."""
+    out = []
+    for row in rows or []:
+        line = []
+        for btn in row:
+            url = btn["url"]
+            if track:
+                url = f"{RENDER_EXTERNAL_URL}/click?url={quote(url, safe='')}&b={track[0]}&u={track[1]}"
+            line.append(InlineKeyboardButton(btn["text"], url=url))
+        if line:
+            out.append(line)
+    return InlineKeyboardMarkup(out) if out else None
+
+
+def get_draft(admin_uid):
+    draft = admin_broadcast_drafts.setdefault(str(admin_uid), {})
+    draft.setdefault("items", [])
+    draft.setdefault("text", "")
+    draft.setdefault("buttons", [])
+    draft.setdefault("ui", [])
+    draft.setdefault("panel", None)
+    draft.setdefault("pending", {})
+    draft.setdefault("error", None)
+    if "lock" not in draft:
+        draft["lock"] = asyncio.Lock()
+    return draft
+
+
+def reset_draft(draft):
+    draft["items"].clear()
+    draft["text"] = ""
+    draft["buttons"].clear()
+    draft["pending"].clear()
+    draft["error"] = None
+
+
+def set_draft_text(draft, html_text):
+    clean, rows = extract_button_rows(html_text)
+    draft["text"] = clean
+    if rows:
+        draft["buttons"] = rows
 
 
 def get_admin_home_text_and_kb():
@@ -1429,51 +1610,318 @@ def get_admin_home_text_and_kb():
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Takwimu & Nchi", callback_data="admin_stats"),
          InlineKeyboardButton("👥 Watumiaji", callback_data="admin_users")],
-        [InlineKeyboardButton("🔍 Angalia Order", callback_data="admin_check_order"),
-         InlineKeyboardButton("📢 Rich Broadcast", callback_data="admin_broadcast_menu")],
+        [InlineKeyboardButton("📢 Rich Broadcast", callback_data="admin_broadcast_menu"),
+         InlineKeyboardButton("📈 Link Clicks", callback_data="admin_clicks")],
         [InlineKeyboardButton("🔄 Safisha Mfumo", callback_data="admin_clean")]
     ])
     return text, kb
 
 
-def get_broadcast_composer_text_and_kb(admin_id):
-    draft = admin_broadcast_drafts.get(str(admin_id), {"items": [], "text": ""})
-    items = draft.get("items", [])
-    text_val = draft.get("text", "")
+def requested_countries_block(limit=10):
+    top = get_top_requested_countries(limit)
+    total = get_requested_countries_total()
+    if not top:
+        return "🌍 <b>NCHI ZINAZOOMBWA (Other)</b>\nHakuna bado.\n"
+    lines = [f"🌍 <b>NCHI ZINAZOOMBWA (Other)</b>  ·  jumla <code>{total}</code>"]
+    for i, (name, cnt) in enumerate(top, start=1):
+        lines.append(f"{i}. {html_escape(name)} — <code>{cnt}</code>")
+    return "\n".join(lines) + "\n"
 
-    photos_cnt = sum(1 for it in items if it["type"] == "photo")
-    videos_cnt = sum(1 for it in items if it["type"] == "video")
-    total_recipients = get_total_users_count()
 
-    preview_snippet = text_val if text_val else "<i>(Hakuna maandishi bado)</i>"
-    if len(preview_snippet) > 400:
-        preview_snippet = preview_snippet[:400] + "..."
+def studio_panel_text(admin_uid, notice=None):
+    draft = get_draft(admin_uid)
+    items = draft["items"]
+    photos = sum(1 for it in items if it["type"] == "photo")
+    videos = len(items) - photos
+    nbtn = sum(len(r) for r in draft["buttons"])
+    blocked = get_blocked_count()
+    recipients = max(get_total_users_count() - blocked, 0)
+    lines = [
+        "📢 <b>BROADCAST STUDIO</b>",
+        f"👥 Wapokeaji: <b>{recipients}</b>" + (f"  ·  🚫 {blocked} wamezuia bot" if blocked else ""),
+        f"🖼 {photos}  ·  🎬 {videos}  ·  🔘 {nbtn}  ·  📝 {'✅' if draft['text'] else '—'}",
+    ]
+    if notice:
+        lines += ["", notice]
+    if not items and not draft["text"]:
+        lines += [
+            "",
+            "✏️ <b>Anza hapa:</b> tuma ujumbe wako (text, picha au video). Tumia format ya Telegram kama kawaida: "
+            "bold, italic, <code>monospace</code> (inakopiwa kwa kugusa), link n.k.",
+            "Utaona muonekano halisi juu ya paneli hii."
+        ]
+    else:
+        lines += ["", "👆 Juu ni muonekano halisi wa ujumbe watakaoupata.", "✏️ Tuma text / picha / video mpya kubadilisha au kuongeza."]
+    return "\n".join(lines)
 
-    msg = (
-        "📢 <b>RICH MEDIA & MULTI-BUTTON BROADCAST STUDIO</b>\n\n"
-        f"👥 Recipients: <b>{total_recipients}</b>\n"
-        f"🖼 Photos attached: <b>{photos_cnt}</b> | 🎬 Videos attached: <b>{videos_cnt}</b>\n"
-        f"📝 Text / Caption set: <b>{'Yes' if text_val else 'No'}</b>\n\n"
-        "<b>Current Text / Buttons Source:</b>\n"
-        f"{preview_snippet}\n\n"
-        "<b>How to compose (unlimited media items):</b>\n"
-        "• Send any number of <b>Photos</b> or <b>Videos</b>—each one adds to your media batch.\n"
-        "• Send a <b>Text message</b> (or media caption) to set/update the message text.\n"
-        "• Formatting supported: <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;u&gt;</code>, "
-        "<code>&lt;s&gt;</code>, <code>&lt;code&gt;</code>, <code>&lt;blockquote&gt;</code>, "
-        "<code>&lt;tg-spoiler&gt;</code>.\n"
-        "• Multi-button syntax at end of text:\n"
-        "  <code>Button 1 | https://link1.com</code>\n"
-        "  <code>Row2 BtnA | https://a.com || Row2 BtnB | https://b.com</code>"
+
+def studio_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔘 Ongeza Button", callback_data="bcast_add_btn"),
+         InlineKeyboardButton("🧩 Dhibiti Buttons", callback_data="bcast_buttons")],
+        [InlineKeyboardButton("🗑 Media", callback_data="bcast_clear_media"),
+         InlineKeyboardButton("🗑 Text", callback_data="bcast_clear_text"),
+         InlineKeyboardButton("🗑 Zote", callback_data="bcast_clear")],
+        [InlineKeyboardButton("ℹ️ Msaada", callback_data="bcast_help")],
+        [InlineKeyboardButton("🚀 Tuma Sasa", callback_data="bcast_send")],
+        [InlineKeyboardButton("🔙 Rudi Menyu", callback_data="admin_home")],
+    ])
+
+
+def _cancel_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Ghairi", callback_data="bcast_back")]])
+
+
+def track_panel(draft, message):
+    key = (message.chat_id, message.message_id)
+    draft["panel"] = key
+    if key not in draft["ui"]:
+        draft["ui"].append(key)
+
+
+async def clear_studio_ui(bot, draft, keep=None):
+    remaining = []
+    for cid, mid in draft["ui"]:
+        if keep and (cid, mid) == tuple(keep):
+            remaining.append((cid, mid))
+            continue
+        await safe_delete_message(bot, cid, mid)
+    draft["ui"] = remaining
+    if draft.get("panel") and not (keep and tuple(draft["panel"]) == tuple(keep)):
+        draft["panel"] = None
+
+
+async def edit_panel(bot, admin_uid, text, kb=None):
+    """Edit the studio control panel in place (falls back to a new message)."""
+    draft = get_draft(admin_uid)
+    panel = draft.get("panel")
+    if panel:
+        try:
+            await bot.edit_message_text(
+                chat_id=panel[0], message_id=panel[1], text=text, parse_mode="HTML",
+                reply_markup=kb, disable_web_page_preview=True
+            )
+            return
+        except Exception as exc:
+            if "not modified" in str(exc).lower():
+                return
+    sent = await bot.send_message(
+        chat_id=int(ADMIN_ID), text=text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
+    )
+    if sent:
+        track_panel(draft, sent)
+
+
+async def render_studio(bot, chat_id, admin_uid, notice=None):
+    """Show the message EXACTLY as users will get it (media + text + buttons) followed by the control panel."""
+    draft = get_draft(admin_uid)
+    async with draft["lock"]:
+        await clear_studio_ui(bot, draft)
+        draft["panel"] = None
+        draft["error"] = None
+        items, text = draft["items"], draft["text"]
+        markup = build_markup(draft["buttons"])
+        warn = None
+        try:
+            if len(items) > 1:
+                group = []
+                for idx, item in enumerate(items):
+                    cap = text if idx == 0 and text else None
+                    ref = item.get("admin_file_id") or item["bytes"]
+                    cls = InputMediaPhoto if item["type"] == "photo" else InputMediaVideo
+                    group.append(cls(media=ref, caption=cap, parse_mode="HTML" if cap else None))
+                for m in await bot.send_media_group(chat_id=chat_id, media=group):
+                    draft["ui"].append((chat_id, m.message_id))
+                if markup:
+                    m = await bot.send_message(chat_id=chat_id, text="👇" if not text else "🔗", reply_markup=markup)
+                    draft["ui"].append((chat_id, m.message_id))
+            elif len(items) == 1:
+                item = items[0]
+                ref = item.get("admin_file_id") or item["bytes"]
+                send = bot.send_photo if item["type"] == "photo" else bot.send_video
+                m = await send(
+                    chat_id=chat_id,
+                    **{("photo" if item["type"] == "photo" else "video"): ref},
+                    caption=text or None,
+                    parse_mode="HTML" if text else None,
+                    reply_markup=markup
+                )
+                draft["ui"].append((chat_id, m.message_id))
+            elif text:
+                m = await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=markup)
+                draft["ui"].append((chat_id, m.message_id))
+        except Exception as exc:
+            warn = f"⚠️ <b>Muonekano una tatizo:</b> <code>{html_escape(str(exc))[:300]}</code>\nRekebisha ujumbe kabla ya kutuma."
+            draft["error"] = str(exc)
+        if not items and not text and draft["buttons"]:
+            warn = (warn or "") + "\n⚠️ Ongeza text au media — button peke yake haitumwi."
+        note = "\n".join(x for x in (notice, warn) if x) or None
+        panel = await bot.send_message(
+            chat_id=chat_id, text=studio_panel_text(admin_uid, note), parse_mode="HTML",
+            reply_markup=studio_keyboard(), disable_web_page_preview=True
+        )
+        track_panel(draft, panel)
+
+
+def schedule_render(bot, chat_id, admin_uid, notice=None, delay=1.0):
+    """Wait briefly (so albums / quick edits arrive together) then refresh the preview once."""
+    draft = get_draft(admin_uid)
+    old = draft.get("render_task")
+    if old:
+        old.cancel()
+
+    async def _job():
+        try:
+            await asyncio.sleep(delay)
+            draft.pop("render_task", None)
+            await render_studio(bot, chat_id, admin_uid, notice)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning(f"Studio render failed: {exc}")
+
+    draft["render_task"] = asyncio.create_task(_job())
+
+
+def buttons_manager_view(draft):
+    flat = flat_buttons(draft["buttons"])
+    if not flat:
+        return (
+            "🧩 <b>BUTTONS</b>\n\nHakuna button bado.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Ongeza Button", callback_data="bcast_add_btn")],
+                [InlineKeyboardButton("🔙 Rudi Studio", callback_data="bcast_back")],
+            ])
+        )
+    lines = ["🧩 <b>BUTTONS</b>  (gusa button kuhariri)\n"]
+    kb = []
+    n = 0
+    for r, row in enumerate(draft["buttons"], start=1):
+        for btn in row:
+            lines.append(f"{n + 1}. <b>{html_escape(btn['text'])}</b>  ·  row {r}")
+            kb.append([InlineKeyboardButton(f"{n + 1}. {btn['text'][:28]}", callback_data=f"bcast_be_{n}")])
+            n += 1
+    kb.append([InlineKeyboardButton("➕ Ongeza", callback_data="bcast_add_btn"),
+               InlineKeyboardButton("📐 Mpangilio", callback_data="bcast_layout")])
+    kb.append([InlineKeyboardButton("🧹 Futa Zote", callback_data="bcast_btn_clear"),
+               InlineKeyboardButton("✅ Maliza", callback_data="bcast_back")])
+    return "\n".join(lines), InlineKeyboardMarkup(kb)
+
+
+async def deliver_broadcast(bot, uid, items, text, markup):
+    """Send one broadcast message. Media is uploaded once; after that Telegram's file_id is reused."""
+    if len(items) > 1:
+        group = []
+        for idx, item in enumerate(items):
+            cap = text if idx == 0 and text else None
+            ref = item.get("file_id") or item["bytes"]
+            cls = InputMediaPhoto if item["type"] == "photo" else InputMediaVideo
+            group.append(cls(media=ref, caption=cap, parse_mode="HTML" if cap else None))
+        sent = await bot.send_media_group(chat_id=uid, media=group)
+        for item, sent_msg in zip(items, sent):
+            _cache_media_file_id(item, sent_msg)
+        if markup:
+            await bot.send_message(chat_id=uid, text="👇" if not text else "🔗", reply_markup=markup)
+    elif len(items) == 1:
+        item = items[0]
+        ref = item.get("file_id") or item["bytes"]
+        if item["type"] == "photo":
+            sent_msg = await bot.send_photo(
+                chat_id=uid, photo=ref, caption=text or None,
+                parse_mode="HTML" if text else None, reply_markup=markup
+            )
+        else:
+            sent_msg = await bot.send_video(
+                chat_id=uid, video=ref, caption=text or None,
+                parse_mode="HTML" if text else None, reply_markup=markup
+            )
+        _cache_media_file_id(item, sent_msg)
+    else:
+        await bot.send_message(chat_id=uid, text=text, parse_mode="HTML", reply_markup=markup)
+
+
+def _progress_text(title, bid):
+    st = broadcast_state
+    done = st["sent"] + st["failed"]
+    pct = int(done * 100 / st["total"]) if st["total"] else 100
+    filled = pct // 10
+    bar = "█" * filled + "░" * (10 - filled)
+    return (
+        f"{title}  <code>#{bid}</code>\n\n"
+        f"{bar}  <b>{pct}%</b>\n"
+        f"👥 Jumla: <code>{st['total']}</code>\n"
+        f"✅ Imetumwa: <code>{st['sent']}</code>\n"
+        f"❌ Imeshindikana: <code>{st['failed']}</code>\n"
+        f"🚫 Wamezuia bot: <code>{st['blocked']}</code>"
     )
 
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👁️ Hakiki (Preview)", callback_data="bcast_preview"),
-         InlineKeyboardButton("🗑 Futa Media/Text", callback_data="bcast_clear")],
-        [InlineKeyboardButton("🚀 Tuma Sasa", callback_data="bcast_send")],
-        [InlineKeyboardButton("🔙 Rudi Menyu", callback_data="admin_home")]
-    ])
-    return msg, kb
+
+async def run_broadcast(main_app, admin_bot, chat_id, panel_id, admin_uid, snap, users, bid):
+    st = broadcast_state
+    items, text, rows = snap["items"], snap["text"], snap["buttons"]
+    stop_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⛔ Simamisha", callback_data="bcast_stop")]])
+    last_edit = time.time()
+    status = "done"
+    try:
+        for uid in users:
+            if st["stop"]:
+                status = "stopped"
+                break
+            markup = build_markup(rows, track=(bid, uid))
+            try:
+                try:
+                    await deliver_broadcast(main_app.bot, uid, items, text, markup)
+                except RetryAfter as e:
+                    await asyncio.sleep(_retry_seconds(e) + 1)
+                    await deliver_broadcast(main_app.bot, uid, items, text, markup)
+                st["sent"] += 1
+            except Forbidden:
+                st["failed"] += 1
+                mark_user_blocked(uid)
+                st["blocked"] += 1
+            except BadRequest as e:
+                st["failed"] += 1
+                if "chat not found" in str(e).lower():
+                    mark_user_blocked(uid)
+                    st["blocked"] += 1
+            except Exception:
+                st["failed"] += 1
+            await asyncio.sleep(0.05)
+
+            if time.time() - last_edit > 6:
+                last_edit = time.time()
+                try:
+                    await admin_bot.edit_message_text(
+                        chat_id=chat_id, message_id=panel_id, text=_progress_text("🚀 <b>BROADCAST INATUMWA...</b>", bid),
+                        parse_mode="HTML", reply_markup=stop_kb
+                    )
+                except Exception:
+                    pass
+    except Exception as exc:
+        status = "error"
+        logger.warning(f"Broadcast crashed: {exc}")
+    finally:
+        try:
+            finish_broadcast(bid, st["sent"], st["failed"], status)
+        except Exception:
+            pass
+        title = {"done": "✅ <b>BROADCAST IMEKAMILIKA!</b>", "stopped": "⛔ <b>BROADCAST IMESIMAMISHWA</b>"}.get(
+            status, "⚠️ <b>BROADCAST IMEKOSA (angalia logs)</b>")
+        done_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📈 Matokeo ya Clicks", callback_data=f"admin_click_{bid}")],
+            [InlineKeyboardButton("🔙 RUDI KWENYE MENYU", callback_data="admin_home")]
+        ])
+        try:
+            await admin_bot.edit_message_text(
+                chat_id=chat_id, message_id=panel_id, text=_progress_text(title, bid),
+                parse_mode="HTML", reply_markup=done_kb
+            )
+        except Exception:
+            pass
+        draft = get_draft(admin_uid)
+        reset_draft(draft)
+        st["running"] = False
+        st["stop"] = False
 
 
 # --- ADMIN PANEL HANDLERS ---
@@ -1495,6 +1943,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
 
     if data == "admin_home":
         context.user_data.pop("admin_mode", None)
+        await clear_studio_ui(context.bot, get_draft(admin_uid), keep=(query.message.chat_id, query.message.message_id))
         text, kb = get_admin_home_text_and_kb()
         await safe_edit_text(query.message, text, reply_markup=kb)
         return
@@ -1513,8 +1962,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
             f"🇳🇬 Nigeria: <code>{c_counts['Nigeria']}</code>\n"
             f"🇿🇼 Zimbabwe: <code>{c_counts['Zimbabwe']}</code>\n"
             f"🇪🇹 Ethiopia: <code>{c_counts['Ethiopia']}</code>\n"
-            f"🌐 Unset: <code>{c_counts['Unset']}</code>\n"
-            "🚀 Status: <b>Online & Stable 24/7</b>",
+            f"🌐 Unset: <code>{c_counts['Unset']}</code>\n\n"
+            + requested_countries_block() +
+            "\n🚀 Status: <b>Online & Stable 24/7</b>",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
         )
         return
@@ -1542,183 +1992,282 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, mai
         )
         return
 
-    if data == "admin_check_order":
-        context.user_data["admin_mode"] = ADMIN_MODE_ORDER
-        await safe_edit_text(
-            query.message,
-            "🔍 <b>ANGALIA ORDER YA MALIPO</b>\n\n"
-            "Tuma Order ID / Ref kwenye chat hii kuangalia rekodi yake kwenye database:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
+    # ---------- Broadcast Studio ----------
+    if data == "admin_broadcast_menu":
+        context.user_data["admin_mode"] = ADMIN_MODE_BROADCAST
+        await safe_delete_message(context.bot, query.message.chat_id, query.message.message_id)
+        await render_studio(context.bot, query.message.chat_id, admin_uid)
+        return
+
+    if data in ("bcast_back", "bcast_clear", "bcast_clear_media", "bcast_clear_text"):
+        context.user_data["admin_mode"] = ADMIN_MODE_BROADCAST
+        draft = get_draft(admin_uid)
+        draft["pending"].clear()
+        if data == "bcast_clear":
+            reset_draft(draft)
+        elif data == "bcast_clear_media":
+            draft["items"].clear()
+        elif data == "bcast_clear_text":
+            draft["text"] = ""
+        track_panel(draft, query.message)
+        await render_studio(context.bot, query.message.chat_id, admin_uid)
+        return
+
+    if data == "bcast_help":
+        draft = get_draft(admin_uid)
+        track_panel(draft, query.message)
+        await edit_panel(
+            context.bot, admin_uid,
+            "ℹ️ <b>MSAADA - BROADCAST STUDIO</b>\n\n"
+            "✍️ <b>Text:</b> andika kama kawaida kwenye Telegram. Chagua maneno kisha tumia menu ya Telegram: "
+            "<b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strike</s>, spoiler, quote, "
+            "<code>monospace</code> (mtumiaji akigusa inakopiwa), na link.\n\n"
+            "🖼 <b>Media:</b> tuma picha/video moja au nyingi (hadi 10). Caption yako inakuwa text ya ujumbe.\n\n"
+            "🔘 <b>Buttons:</b> bonyeza <b>Ongeza Button</b> (jina → link → mpangilio). "
+            "Unaweza pia kuandika mwishoni mwa text:\n"
+            "<code>Jina | https://link.com</code>\n"
+            "<code>A | https://a.com || B | https://b.com</code> (2 kwa row moja)\n\n"
+            "📈 Kila click kwenye button inahesabiwa kwenye <b>Link Clicks</b>.\n"
+            "👆 Kila mabadiliko yanaonekana juu kama watumiaji watakavyoona.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Rudi Studio", callback_data="bcast_back")]])
         )
         return
 
-    if data == "admin_broadcast_menu":
-        context.user_data["admin_mode"] = ADMIN_MODE_BROADCAST
-        admin_broadcast_drafts.setdefault(admin_uid, {"items": [], "text": ""})
-        msg, kb = get_broadcast_composer_text_and_kb(admin_uid)
-        await safe_edit_text(query.message, msg, reply_markup=kb)
+    if data == "bcast_add_btn":
+        draft = get_draft(admin_uid)
+        track_panel(draft, query.message)
+        if sum(len(r) for r in draft["buttons"]) >= MAX_BUTTONS_TOTAL:
+            await render_studio(context.bot, query.message.chat_id, admin_uid, notice=f"⚠️ Kikomo cha buttons {MAX_BUTTONS_TOTAL} kimefika.")
+            return
+        draft["pending"] = {}
+        context.user_data["admin_mode"] = ADMIN_MODE_BTN_LABEL
+        await edit_panel(
+            context.bot, admin_uid,
+            "🔘 <b>ONGEZA BUTTON</b>  (1/2)\n\nTuma <b>jina la button</b>.\nMfano: <code>🔥 Jiunge Sasa</code>",
+            _cancel_kb()
+        )
         return
 
-    if data == "bcast_clear":
+    if data in ("bcast_btn_same", "bcast_btn_new"):
+        draft = get_draft(admin_uid)
+        track_panel(draft, query.message)
+        pend = draft["pending"]
+        if pend.get("label") and pend.get("url"):
+            add_button_to_draft(draft, pend["label"], pend["url"], same_row=(data == "bcast_btn_same"))
+        draft["pending"].clear()
         context.user_data["admin_mode"] = ADMIN_MODE_BROADCAST
-        admin_broadcast_drafts[admin_uid] = {"items": [], "text": ""}
-        msg, kb = get_broadcast_composer_text_and_kb(admin_uid)
-        await safe_edit_text(query.message, msg, reply_markup=kb)
+        await render_studio(context.bot, query.message.chat_id, admin_uid)
         return
 
-    if data == "bcast_preview":
-        context.user_data["admin_mode"] = ADMIN_MODE_BROADCAST
-        draft = admin_broadcast_drafts.get(admin_uid, {"items": [], "text": ""})
-        items = draft.get("items", [])
-        clean_text, markup = parse_broadcast_text_and_buttons(draft.get("text", ""))
+    if data == "bcast_buttons":
+        draft = get_draft(admin_uid)
+        track_panel(draft, query.message)
+        text_, kb_ = buttons_manager_view(draft)
+        await edit_panel(context.bot, admin_uid, text_, kb_)
+        return
 
-        try:
-            if len(items) > 1:
-                media_group = []
-                for idx, item in enumerate(items):
-                    cap = clean_text if idx == 0 and clean_text else None
-                    if item["type"] == "photo":
-                        media_group.append(InputMediaPhoto(media=item["bytes"], caption=cap, parse_mode="HTML" if cap else None))
-                    else:
-                        media_group.append(InputMediaVideo(media=item["bytes"], caption=cap, parse_mode="HTML" if cap else None))
-                await query.message.reply_media_group(media=media_group)
-                if markup or (not clean_text):
-                    await query.message.reply_text(
-                        "👇 <b>Buttons Preview:</b>" if markup else "ℹ️ <i>Media group previewed above.</i>",
-                        parse_mode="HTML",
-                        reply_markup=markup
-                    )
-            elif len(items) == 1:
-                item = items[0]
-                if item["type"] == "photo":
-                    await query.message.reply_photo(
-                        photo=item["bytes"],
-                        caption=clean_text or None,
-                        parse_mode="HTML" if clean_text else None,
-                        reply_markup=markup
-                    )
-                else:
-                    await query.message.reply_video(
-                        video=item["bytes"],
-                        caption=clean_text or None,
-                        parse_mode="HTML" if clean_text else None,
-                        reply_markup=markup
-                    )
-            else:
-                await query.message.reply_text(
-                    clean_text or "<i>(Empty broadcast)</i>",
-                    parse_mode="HTML",
-                    reply_markup=markup
-                )
-        except Exception as exc:
-            await query.message.reply_text(f"⚠️ Preview issue: <code>{exc}</code>", parse_mode="HTML")
+    if data == "bcast_btn_clear":
+        draft = get_draft(admin_uid)
+        track_panel(draft, query.message)
+        draft["buttons"].clear()
+        text_, kb_ = buttons_manager_view(draft)
+        await edit_panel(context.bot, admin_uid, text_, kb_)
+        return
 
-        msg, kb = get_broadcast_composer_text_and_kb(admin_uid)
-        await query.message.reply_text(msg, parse_mode="HTML", reply_markup=kb)
+    if data == "bcast_layout":
+        draft = get_draft(admin_uid)
+        track_panel(draft, query.message)
+        await edit_panel(
+            context.bot, admin_uid,
+            "📐 <b>MPANGILIO WA BUTTONS</b>\n\nChagua buttons ngapi kwa kila row:",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("1 kwa row", callback_data="bcast_lay_1"),
+                 InlineKeyboardButton("2 kwa row", callback_data="bcast_lay_2"),
+                 InlineKeyboardButton("3 kwa row", callback_data="bcast_lay_3")],
+                [InlineKeyboardButton("Zote row moja", callback_data="bcast_lay_all")],
+                [InlineKeyboardButton("🔙 Rudi", callback_data="bcast_buttons")],
+            ])
+        )
+        return
+
+    if data.startswith("bcast_lay_"):
+        draft = get_draft(admin_uid)
+        track_panel(draft, query.message)
+        per = {"1": 1, "2": 2, "3": 3, "all": MAX_BUTTONS_PER_ROW}.get(data.rsplit("_", 1)[1], 2)
+        draft["buttons"] = rows_from_flat(flat_buttons(draft["buttons"]), per)
+        text_, kb_ = buttons_manager_view(draft)
+        await edit_panel(context.bot, admin_uid, text_, kb_)
+        return
+
+    if data.startswith(("bcast_be_", "bcast_bel_", "bcast_beu_", "bcast_bed_")):
+        draft = get_draft(admin_uid)
+        track_panel(draft, query.message)
+        action, _, idx_s = data.rpartition("_")
+        idx = int(idx_s) if idx_s.isdigit() else -1
+        pos = locate_button(draft["buttons"], idx)
+        if pos is None:
+            text_, kb_ = buttons_manager_view(draft)
+            await edit_panel(context.bot, admin_uid, text_, kb_)
+            return
+        r, c = pos
+        btn = draft["buttons"][r][c]
+        if action == "bcast_bed":
+            draft["buttons"][r].pop(c)
+            draft["buttons"] = [row for row in draft["buttons"] if row]
+            text_, kb_ = buttons_manager_view(draft)
+            await edit_panel(context.bot, admin_uid, text_, kb_)
+            return
+        if action in ("bcast_bel", "bcast_beu"):
+            draft["pending"] = {"idx": idx}
+            context.user_data["admin_mode"] = ADMIN_MODE_BTN_EDIT_LABEL if action == "bcast_bel" else ADMIN_MODE_BTN_EDIT_URL
+            ask = "<b>jina jipya</b> la button" if action == "bcast_bel" else "<b>link mpya</b> (https://...)"
+            await edit_panel(
+                context.bot, admin_uid,
+                f"✏️ <b>HARIRI BUTTON {idx + 1}</b>\n\nSasa: <b>{html_escape(btn['text'])}</b>\n{html_escape(btn['url'])}\n\nTuma {ask}.",
+                _cancel_kb()
+            )
+            return
+        await edit_panel(
+            context.bot, admin_uid,
+            f"🔘 <b>BUTTON {idx + 1}</b>\n\n📝 Jina: <b>{html_escape(btn['text'])}</b>\n🔗 Link: {html_escape(btn['url'])}\n↔️ Row: {r + 1}",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Jina", callback_data=f"bcast_bel_{idx}"),
+                 InlineKeyboardButton("🔗 Link", callback_data=f"bcast_beu_{idx}")],
+                [InlineKeyboardButton("🗑 Futa", callback_data=f"bcast_bed_{idx}")],
+                [InlineKeyboardButton("🔙 Rudi", callback_data="bcast_buttons")],
+            ])
+        )
         return
 
     if data == "bcast_send":
-        context.user_data.pop("admin_mode", None)
-        draft = admin_broadcast_drafts.get(admin_uid, {"items": [], "text": ""})
-        items = draft.get("items", [])
-        clean_text, markup = parse_broadcast_text_and_buttons(draft.get("text", ""))
+        draft = get_draft(admin_uid)
+        track_panel(draft, query.message)
+        if broadcast_state["running"]:
+            if (query.message.chat_id, query.message.message_id) != broadcast_state.get("panel"):
+                await safe_edit_text(
+                    query.message,
+                    f"⚠️ Kuna broadcast <code>#{broadcast_state['id']}</code> inayoendelea sasa. Subiri imalize au ibonyeze Simamisha kwenye paneli yake.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
+                )
+            return
+        if not draft["items"] and not draft["text"]:
+            await render_studio(context.bot, query.message.chat_id, admin_uid, notice="❌ Hakuna kitu cha kutuma. Ongeza text au media.")
+            return
+        if draft.get("error"):
+            await render_studio(context.bot, query.message.chat_id, admin_uid, notice="❌ Rekebisha tatizo la muonekano kwanza.")
+            return
+        recipients = max(get_total_users_count() - get_blocked_count(), 0)
+        photos = sum(1 for it in draft["items"] if it["type"] == "photo")
+        await edit_panel(
+            context.bot, admin_uid,
+            "⚠️ <b>THIBITISHA KUTUMA</b>\n\n"
+            f"Ujumbe utatumwa kwa watumiaji <b>{recipients}</b> wote.\n"
+            f"🖼 {photos}  ·  🎬 {len(draft['items']) - photos}  ·  🔘 {sum(len(r) for r in draft['buttons'])}\n\n"
+            "Hakikisha muonekano wa juu uko sawa. Ukishaanza unaweza kusimamisha, "
+            "lakini ujumbe uliokwisha tumwa hauwezi kurudishwa.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Ndio, Tuma Sasa", callback_data="bcast_confirm")],
+                [InlineKeyboardButton("❌ Ghairi", callback_data="bcast_back")],
+            ])
+        )
+        return
 
-        if not items and not clean_text:
+    if data == "bcast_confirm":
+        draft = get_draft(admin_uid)
+        track_panel(draft, query.message)
+        if broadcast_state["running"]:
+            if (query.message.chat_id, query.message.message_id) != broadcast_state.get("panel"):
+                await safe_edit_text(
+                    query.message,
+                    f"⚠️ Kuna broadcast <code>#{broadcast_state['id']}</code> inayoendelea sasa. Subiri imalize au ibonyeze Simamisha kwenye paneli yake.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
+                )
+            return
+        if (not draft["items"] and not draft["text"]) or draft.get("error"):
+            await render_studio(context.bot, query.message.chat_id, admin_uid, notice="❌ Hakuna kitu sahihi cha kutuma.")
+            return
+        users = get_broadcast_users()
+        snap = {
+            "items": [dict(it) for it in draft["items"]],
+            "text": draft["text"],
+            "buttons": copy.deepcopy(draft["buttons"]),
+        }
+        bid = create_broadcast(strip_tags(draft["text"])[:80] or "(media)", len(users))
+        broadcast_state.update(running=True, stop=False, id=bid, sent=0, failed=0, blocked=0, total=len(users))
+        panel_key = (query.message.chat_id, query.message.message_id)
+        await clear_studio_ui(context.bot, draft, keep=panel_key)
+        await edit_panel(
+            context.bot, admin_uid, _progress_text("🚀 <b>BROADCAST INATUMWA...</b>", bid),
+            InlineKeyboardMarkup([[InlineKeyboardButton("⛔ Simamisha", callback_data="bcast_stop")]])
+        )
+        draft["ui"] = []
+        draft["panel"] = None
+        broadcast_state["panel"] = panel_key
+        broadcast_state["task"] = asyncio.create_task(
+            run_broadcast(main_app, context.bot, panel_key[0], panel_key[1], admin_uid, snap, users, bid)
+        )
+        return
+
+    if data == "bcast_stop":
+        if broadcast_state["running"]:
+            broadcast_state["stop"] = True
             await safe_edit_text(
                 query.message,
-                "❌ Hakuna media wala ujumbe uliowekwa. Rudi kwenye Broadcast Studio.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_broadcast_menu")]])
+                _progress_text("⏳ <b>INASIMAMISHA...</b>", broadcast_state["id"])
             )
-            return
-
-        users = get_broadcast_users()
-        success = 0
-        failed = 0
-        newly_blocked = 0
-        status_msg = await safe_edit_text(query.message, f"🚀 Inatuma broadcast kwa watumiaji {len(users)}...")
-
-        async def deliver(uid):
-            # First send uploads the file; every later send reuses Telegram's file_id (no upload).
-            if len(items) > 1:
-                media_group = []
-                for idx, item in enumerate(items):
-                    cap = clean_text if idx == 0 and clean_text else None
-                    ref = item.get("file_id") or item["bytes"]
-                    if item["type"] == "photo":
-                        media_group.append(InputMediaPhoto(media=ref, caption=cap, parse_mode="HTML" if cap else None))
-                    else:
-                        media_group.append(InputMediaVideo(media=ref, caption=cap, parse_mode="HTML" if cap else None))
-                sent = await main_app.bot.send_media_group(chat_id=uid, media=media_group)
-                for item, sent_msg in zip(items, sent):
-                    _cache_media_file_id(item, sent_msg)
-                if markup:
-                    await main_app.bot.send_message(
-                        chat_id=uid,
-                        text="👇" if not clean_text else "🔗",
-                        reply_markup=markup
-                    )
-            elif len(items) == 1:
-                item = items[0]
-                ref = item.get("file_id") or item["bytes"]
-                if item["type"] == "photo":
-                    sent_msg = await main_app.bot.send_photo(
-                        chat_id=uid,
-                        photo=ref,
-                        caption=clean_text or None,
-                        parse_mode="HTML" if clean_text else None,
-                        reply_markup=markup
-                    )
-                else:
-                    sent_msg = await main_app.bot.send_video(
-                        chat_id=uid,
-                        video=ref,
-                        caption=clean_text or None,
-                        parse_mode="HTML" if clean_text else None,
-                        reply_markup=markup
-                    )
-                _cache_media_file_id(item, sent_msg)
-            else:
-                await main_app.bot.send_message(
-                    chat_id=uid,
-                    text=clean_text,
-                    parse_mode="HTML",
-                    reply_markup=markup
-                )
-
-        for uid in users:
-            try:
-                try:
-                    await deliver(uid)
-                except RetryAfter as e:
-                    await asyncio.sleep(_retry_seconds(e) + 1)
-                    await deliver(uid)
-                success += 1
-            except Forbidden:
-                # bot blocked / user deactivated: stop sending to this user in future broadcasts
-                failed += 1
-                mark_user_blocked(uid)
-                newly_blocked += 1
-            except BadRequest as e:
-                failed += 1
-                if "chat not found" in str(e).lower():
-                    mark_user_blocked(uid)
-                    newly_blocked += 1
-            except Exception:
-                failed += 1
-            await asyncio.sleep(0.05)
-
-        admin_broadcast_drafts[admin_uid] = {"items": [], "text": ""}
-        done_text = (
-            "✅ <b>BROADCAST IMEKAMILIKA!</b>\n\n"
-            f"📤 Imefanikiwa: <code>{success}</code>\n"
-            f"❌ Imeshindikana: <code>{failed}</code>\n"
-            f"🚫 Wamezuia bot (hawatatumiwa tena): <code>{newly_blocked}</code>"
-        )
-        done_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI KWENYE MENYU", callback_data="admin_home")]])
-        if status_msg:
-            await safe_edit_text(status_msg, done_text, reply_markup=done_kb)
         else:
-            await query.message.reply_text(done_text, parse_mode="HTML", reply_markup=done_kb)
+            await safe_edit_text(
+                query.message, "ℹ️ Hakuna broadcast inayoendelea sasa.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
+            )
+        return
+
+    # ---------- Link click tracking ----------
+    if data == "admin_clicks":
+        rows = get_recent_broadcasts(8)
+        lines = ["📈 <b>LINK CLICKS</b>\n"]
+        kb = []
+        if not rows:
+            lines.append("Hakuna broadcast iliyotumwa bado. Clicks zitaanza kuhesabiwa baada ya broadcast yako ya kwanza yenye button.")
+        for (bid, created, preview, recipients, sent, failed, status, clicks, unique) in rows:
+            lines.append(f"<b>#{bid}</b> · {html_escape(str(created)[:16])} UTC · 👆 <code>{clicks}</code> · 🧑 <code>{unique}</code>")
+            kb.append([InlineKeyboardButton(f"#{bid} · {str(created)[5:16]} · 👆{clicks}", callback_data=f"admin_click_{bid}")])
+        old = get_untracked_click_total()
+        if old:
+            lines.append(f"\nℹ️ Clicks za links za zamani (bila broadcast): <code>{old}</code>")
+        kb.append([InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")])
+        await safe_edit_text(query.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if data.startswith("admin_click_"):
+        bid_s = data.rsplit("_", 1)[1]
+        head, links = get_broadcast_click_detail(int(bid_s)) if bid_s.isdigit() else (None, [])
+        back_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📈 Broadcasts zote", callback_data="admin_clicks")],
+            [InlineKeyboardButton("🔙 RUDI KWENYE MENYU", callback_data="admin_home")]
+        ])
+        if not head:
+            await safe_edit_text(query.message, "❌ Broadcast haipatikani.", reply_markup=back_kb)
+            return
+        (bid, created, preview, recipients, sent, failed, status, clicks, unique) = head
+        pct = lambda n: f"{(n * 100.0 / sent):.1f}%" if sent else "0%"
+        lines = [
+            f"📈 <b>MATOKEO YA BROADCAST #{bid}</b>",
+            f"🗓 {html_escape(str(created)[:16])} UTC  ·  {html_escape(str(status))}",
+            f"📝 {html_escape(preview or '')}",
+            "",
+            f"👥 Wapokeaji: <code>{recipients}</code>  ·  ✅ <code>{sent}</code>  ·  ❌ <code>{failed}</code>",
+            f"👆 Clicks: <code>{clicks}</code> ({pct(clicks)})",
+            f"🧑 Watu tofauti: <code>{unique}</code> ({pct(unique)})",
+        ]
+        if links:
+            lines.append("\n🔗 <b>Kwa kila link:</b>")
+            for i, (url, total, uniq) in enumerate(links, start=1):
+                short = url if len(url) <= 48 else url[:45] + "..."
+                lines.append(f"{i}. {html_escape(short)}\n    👆 <code>{total}</code> · 🧑 <code>{uniq}</code>")
+        else:
+            lines.append("\nBado hakuna aliyebonyeza link.")
+        await safe_edit_text(query.message, "\n".join(lines), reply_markup=back_kb, disable_web_page_preview=True)
         return
 
     if data == "admin_clean":
@@ -1735,56 +2284,98 @@ async def admin_message_router(update: Update, context: ContextTypes.DEFAULT_TYP
     admin_uid = str(update.effective_user.id)
     if admin_uid != str(ADMIN_ID):
         return
-
-    mode = context.user_data.get("admin_mode")
-    if mode == ADMIN_MODE_ORDER:
-        context.user_data.pop("admin_mode", None)
-        order_ref = (update.message.text or "").strip()
-        order_data = get_order_details(order_ref)
-        if order_data:
-            uid, phone, amount, db_status = order_data
-            await update.message.reply_text(
-                f"📦 <b>ORDER: {order_ref}</b>\n\n"
-                f"👤 User ID: <code>{uid}</code>\n"
-                f"📱 Phone: <code>{phone}</code>\n"
-                f"💵 Amount: <code>{amount}</code>\n"
-                f"💾 Status: <code>{db_status}</code>",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
-            )
-        else:
-            await update.message.reply_text(
-                f"❌ Order <code>{order_ref}</code> haipatikani.",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 RUDI", callback_data="admin_home")]])
-            )
+    msg = update.message
+    if not msg:
         return
 
+    mode = context.user_data.get("admin_mode")
+    chat_id = msg.chat_id
+    draft = get_draft(admin_uid)
+
+    # ----- button builder steps -----
+    if mode in (ADMIN_MODE_BTN_LABEL, ADMIN_MODE_BTN_EDIT_LABEL):
+        label = (msg.text or "").strip()[:64]
+        if not label:
+            await edit_panel(context.bot, admin_uid, "⚠️ Tuma jina la button kama text.", _cancel_kb())
+            return
+        if mode == ADMIN_MODE_BTN_LABEL:
+            draft["pending"]["label"] = label
+            context.user_data["admin_mode"] = ADMIN_MODE_BTN_URL
+            await edit_panel(
+                context.bot, admin_uid,
+                f"🔘 <b>ONGEZA BUTTON</b>  (2/2)\n\nJina: <b>{html_escape(label)}</b>\n\nSasa tuma <b>link</b> (mfano <code>https://t.me/jina</code>).",
+                _cancel_kb()
+            )
+        else:
+            pos = locate_button(draft["buttons"], draft["pending"].get("idx", -1))
+            if pos:
+                draft["buttons"][pos[0]][pos[1]]["text"] = label
+            draft["pending"].clear()
+            context.user_data["admin_mode"] = ADMIN_MODE_BROADCAST
+            await render_studio(context.bot, chat_id, admin_uid)
+        return
+
+    if mode in (ADMIN_MODE_BTN_URL, ADMIN_MODE_BTN_EDIT_URL):
+        url = normalize_button_url(msg.text)
+        if not url:
+            await edit_panel(
+                context.bot, admin_uid,
+                "⚠️ Link si sahihi. Tuma link kamili, mfano <code>https://example.com</code>.",
+                _cancel_kb()
+            )
+            return
+        if mode == ADMIN_MODE_BTN_EDIT_URL:
+            pos = locate_button(draft["buttons"], draft["pending"].get("idx", -1))
+            if pos:
+                draft["buttons"][pos[0]][pos[1]]["url"] = url
+            draft["pending"].clear()
+            context.user_data["admin_mode"] = ADMIN_MODE_BROADCAST
+            await render_studio(context.bot, chat_id, admin_uid)
+            return
+        draft["pending"]["url"] = url
+        if not draft["buttons"]:
+            add_button_to_draft(draft, draft["pending"]["label"], url, same_row=False)
+            draft["pending"].clear()
+            context.user_data["admin_mode"] = ADMIN_MODE_BROADCAST
+            await render_studio(context.bot, chat_id, admin_uid)
+            return
+        await edit_panel(
+            context.bot, admin_uid,
+            f"🔘 <b>{html_escape(draft['pending']['label'])}</b>\n\nIweke wapi?",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("↔️ Row ya mwisho (pembeni)", callback_data="bcast_btn_same")],
+                [InlineKeyboardButton("⬇️ Row mpya (chini)", callback_data="bcast_btn_new")],
+                [InlineKeyboardButton("❌ Ghairi", callback_data="bcast_back")],
+            ])
+        )
+        return
+
+    # ----- compose the broadcast -----
     if mode == ADMIN_MODE_BROADCAST:
-        draft = admin_broadcast_drafts.setdefault(admin_uid, {"items": [], "text": ""})
-        msg = update.message
-
-        if msg.photo:
-            tg_file = await context.bot.get_file(msg.photo[-1].file_id)
-            raw_bytes = bytes(await tg_file.download_as_bytearray())
-            draft["items"].append({"type": "photo", "bytes": raw_bytes})
+        notice = None
+        if msg.photo or msg.video:
+            if len(draft["items"]) >= MAX_MEDIA_ITEMS:
+                notice = f"⚠️ Kikomo ni media {MAX_MEDIA_ITEMS} kwa broadcast moja."
+            else:
+                kind = "photo" if msg.photo else "video"
+                file_id = msg.photo[-1].file_id if msg.photo else msg.video.file_id
+                try:
+                    tg_file = await context.bot.get_file(file_id)
+                    raw_bytes = bytes(await tg_file.download_as_bytearray())
+                    draft["items"].append({"type": kind, "bytes": raw_bytes, "admin_file_id": file_id})
+                except Exception as exc:
+                    notice = f"⚠️ Siwezi kupakua {('picha' if kind == 'photo' else 'video')} hii (labda ni kubwa kuliko 20MB): {html_escape(str(exc))[:120]}"
             if msg.caption:
-                draft["text"] = msg.caption
-        elif msg.video:
-            tg_file = await context.bot.get_file(msg.video.file_id)
-            raw_bytes = bytes(await tg_file.download_as_bytearray())
-            draft["items"].append({"type": "video", "bytes": raw_bytes})
-            if msg.caption:
-                draft["text"] = msg.caption
+                set_draft_text(draft, message_to_html(msg))
         elif msg.text:
-            draft["text"] = msg.text
-
-        composer_msg, composer_kb = get_broadcast_composer_text_and_kb(admin_uid)
-        await msg.reply_text(composer_msg, parse_mode="HTML", reply_markup=composer_kb)
+            set_draft_text(draft, message_to_html(msg))
+        else:
+            notice = "⚠️ Aina hiyo ya ujumbe haitumiki. Tuma text, picha au video."
+        schedule_render(context.bot, chat_id, admin_uid, notice)
         return
 
     text, kb = get_admin_home_text_and_kb()
-    await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+    await msg.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 # --- FLASK WEB SERVER WITH CLICK ANALYTICS REDIRECT ---
@@ -1801,10 +2392,17 @@ def click_redirect():
     target_url = request.args.get("url", TARGET_SITE)
     if not re.match(r"^https?://", target_url, re.IGNORECASE):
         target_url = TARGET_SITE
-    try:
-        log_broadcast_click("user", target_url)
-    except Exception:
-        pass
+    if request.method != "HEAD":
+        bid_raw = request.args.get("b", "")
+        uid_raw = request.args.get("u", "")
+        try:
+            log_broadcast_click(
+                uid_raw if uid_raw.isdigit() else "unknown",
+                target_url,
+                int(bid_raw) if bid_raw.isdigit() else None
+            )
+        except Exception:
+            pass
     return redirect(target_url)
 
 
@@ -1814,10 +2412,6 @@ def run_flask():
 
 
 # --- BACKGROUND LOOP: 2-DAY AUTO-DELETE + REGION KEYBOARD RETURN & WEEKLY BACKUP ---
-CLEANUP_NOTICE_COOLDOWN = 24 * 60 * 60   # at most one "old messages cleared" notice per user per day
-last_cleanup_notice = {}
-
-
 async def background_automation_loop(main_app):
     last_backup_key = None
     while True:
@@ -1829,33 +2423,10 @@ async def background_automation_loop(main_app):
             expired_rows = get_expired_messages(cutoff_ts)
             if expired_rows:
                 processed_ids = []
-                notified_users = set()
 
                 for row_id, uid, chat_id, msg_id in expired_rows:
                     await safe_delete_message(main_app.bot, chat_id, msg_id)
                     processed_ids.append(row_id)
-
-                    if uid not in notified_users and now_ts - last_cleanup_notice.get(uid, 0) >= CLEANUP_NOTICE_COOLDOWN:
-                        notified_users.add(uid)
-                        last_cleanup_notice[uid] = now_ts
-                        lang = get_user_language(uid)
-                        country = get_user_country(uid) or DEFAULT_COUNTRY
-                        return_msg = (
-                            "⏳ <b>Old messages were cleared after 2 days.</b>\n\n"
-                            "📍 Pick your region below to continue:"
-                            if lang == "en"
-                            else "⏳ <b>Ujumbe wa siku 2 umefutwa kiotomatiki.</b>\n\n"
-                            "📍 Chagua mkoa wako hapa chini kuendelea:"
-                        )
-                        try:
-                            await main_app.bot.send_message(
-                                chat_id=int(chat_id),
-                                text=return_msg,
-                                parse_mode="HTML",
-                                reply_markup=get_region_keyboard(country, lang)
-                            )
-                        except Exception:
-                            pass
 
                 delete_tracked_messages_by_ids(processed_ids)
         except Exception as exc:
@@ -2035,3 +2606,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
