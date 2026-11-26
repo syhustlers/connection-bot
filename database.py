@@ -59,6 +59,8 @@ def init_db():
             c.execute("ALTER TABLE users ADD COLUMN country TEXT")
         if "blocked" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0")
+        if "requested_country" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN requested_country TEXT")
         if "joined_at" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN joined_at TEXT")
             if "joined_date" in cols:
@@ -92,6 +94,22 @@ def init_db():
                 user_id TEXT,
                 target_url TEXT,
                 clicked_at TEXT
+            )
+        """)
+        c.execute("PRAGMA table_info(broadcast_clicks)")
+        bc_cols = {row[1] for row in c.fetchall()}
+        if "broadcast_id" not in bc_cols:
+            c.execute("ALTER TABLE broadcast_clicks ADD COLUMN broadcast_id INTEGER")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_clicks_broadcast ON broadcast_clicks (broadcast_id)")
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS broadcasts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT,
+                preview TEXT,
+                recipients INTEGER DEFAULT 0,
+                sent INTEGER DEFAULT 0,
+                failed INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'running'
             )
         """)
         c.execute("""
@@ -359,13 +377,98 @@ def get_order_details(order_id):
         return row
 
 
-def log_broadcast_click(user_id, target_url):
+def log_broadcast_click(user_id, target_url, broadcast_id=None):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO broadcast_clicks (user_id, target_url, clicked_at) VALUES (?, ?, ?)",
-            (str(user_id), target_url, str(datetime.utcnow()))
+            "INSERT INTO broadcast_clicks (user_id, target_url, clicked_at, broadcast_id) VALUES (?, ?, ?, ?)",
+            (str(user_id), target_url, str(datetime.utcnow()), broadcast_id)
         )
         conn.commit()
+
+
+def create_broadcast(preview, recipients):
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO broadcasts (created_at, preview, recipients, status) VALUES (?, ?, ?, 'running')",
+            (str(datetime.utcnow()), (preview or "")[:120], int(recipients))
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def finish_broadcast(broadcast_id, sent, failed, status):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE broadcasts SET sent = ?, failed = ?, status = ? WHERE id = ?",
+            (int(sent), int(failed), status, int(broadcast_id))
+        )
+        conn.commit()
+
+
+_BROADCAST_SELECT = """
+    SELECT b.id, b.created_at, b.preview, b.recipients, b.sent, b.failed, b.status,
+           (SELECT COUNT(*) FROM broadcast_clicks c WHERE c.broadcast_id = b.id),
+           (SELECT COUNT(DISTINCT CASE WHEN c.user_id != 'unknown' THEN c.user_id END)
+              FROM broadcast_clicks c WHERE c.broadcast_id = b.id)
+    FROM broadcasts b
+"""
+
+
+def get_recent_broadcasts(limit=8):
+    with get_conn() as conn:
+        return conn.execute(_BROADCAST_SELECT + " ORDER BY b.id DESC LIMIT ?", (int(limit),)).fetchall()
+
+
+def get_broadcast_click_detail(broadcast_id):
+    """-> (summary_row or None, [(target_url, total_clicks, unique_users), ...])"""
+    with get_conn() as conn:
+        head = conn.execute(_BROADCAST_SELECT + " WHERE b.id = ?", (int(broadcast_id),)).fetchone()
+        links = conn.execute(
+            """
+            SELECT target_url, COUNT(*),
+                   COUNT(DISTINCT CASE WHEN user_id != 'unknown' THEN user_id END)
+            FROM broadcast_clicks WHERE broadcast_id = ?
+            GROUP BY target_url ORDER BY COUNT(*) DESC LIMIT 15
+            """,
+            (int(broadcast_id),)
+        ).fetchall()
+        return head, links
+
+
+def get_untracked_click_total():
+    """Clicks that are not tied to any broadcast (old links)."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) FROM broadcast_clicks WHERE broadcast_id IS NULL").fetchone()
+        return int(row[0] or 0) if row else 0
+
+
+def set_user_requested_country(user_id, country_name):
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET requested_country = ? WHERE user_id = ?", (country_name, str(user_id)))
+        conn.commit()
+
+
+def get_top_requested_countries(limit=10):
+    """[(country_name, users), ...] most requested first (case-insensitive grouping)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT MIN(requested_country), COUNT(*) FROM users
+            WHERE requested_country IS NOT NULL AND requested_country != ''
+            GROUP BY LOWER(requested_country)
+            ORDER BY COUNT(*) DESC, MIN(requested_country) ASC LIMIT ?
+            """,
+            (int(limit),)
+        ).fetchall()
+        return [(r[0], int(r[1])) for r in rows]
+
+
+def get_requested_countries_total():
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE requested_country IS NOT NULL AND requested_country != ''"
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
 
 
 def track_user_message(user_id, chat_id, message_id, sent_at):
@@ -392,4 +495,3 @@ def delete_tracked_messages_by_ids(row_ids):
     with get_conn() as conn:
         conn.execute(f"DELETE FROM tracked_messages WHERE id IN ({placeholders})", list(row_ids))
         conn.commit()
-        
